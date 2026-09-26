@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Redy Agents API
-  version: 0.1.0
-  description: Local scaffold with an in-memory session store and demo model.
+  version: 0.2.0
+  description: Java service with an in-memory session store and demo model.
 servers:
   - url: http://127.0.0.1:8080
 paths:
@@ -34,6 +34,8 @@ paths:
                 $ref: '#/components/schemas/Session'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
   /v1/agents/sessions/{sessionID}:
     parameters:
       - $ref: '#/components/parameters/sessionID'
@@ -77,6 +79,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
   /v1/agents/sessions/{sessionID}/turns/{turnID}:
     parameters:
       - $ref: '#/components/parameters/sessionID'
@@ -174,6 +178,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     Conflict:
       description: Session already has an active turn, or turn cannot be cancelled
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnsupportedMediaType:
+      description: Content-Type must be application/json
       content:
         application/json:
           schema:

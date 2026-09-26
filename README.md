@@ -1,16 +1,19 @@
 # Redy Agents API
 
-A small, standalone Agents API scaffold in Go. The HTTP layer manages sessions, asynchronous turns, cancellation, and replayable events. The runner owns the agent loop; model and tool implementations are replaceable interfaces.
+Java 17 / Spring Boot Agents API starter. It provides asynchronous turns, cancellation, JSON event replay, and Server-Sent Events (SSE). A replaceable model and tool loop sits behind the HTTP API.
 
-## Run locally
+The bundled `demo` model makes no network calls and returns `Demo response: <input>`. This keeps the API runnable without credentials while a real model adapter is being developed.
 
-Requires Go 1.23 or newer. The server listens on `127.0.0.1:8080` by default.
+## Run
+
+Requirements: Java 17+ and Maven 3.6.3+.
 
 ```sh
-go run ./cmd/redy-api
+mvn test
+mvn spring-boot:run
 ```
 
-Set `REDY_ADDR` to choose a different listen address. The default runner uses `DemoModel`; create an agent with `model: "demo"`. It makes no network calls and returns `Demo response: <input>`.
+The server listens on `127.0.0.1:8080` by default. Set `REDY_HOST` and `REDY_PORT` to change that address.
 
 ```sh
 curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions \
@@ -22,27 +25,25 @@ curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/turns \
   -d '{"input":"Hello"}'
 
 curl -sS http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/turns/TURN_ID
-curl -sS http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/events?after=0
+curl -sS 'http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/events?after=0'
 curl -N -H 'Accept: text/event-stream' http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/events
 ```
 
-`POST /turns` returns `202` immediately. Poll the turn or subscribe to events until it reaches `completed`, `failed`, or `cancelled`. Event `sequence` values are per session. For SSE reconnects, send `Last-Event-ID` or `?after=<sequence>`. To cancel, `POST /v1/agents/sessions/{sessionID}/turns/{turnID}/cancel`. It first enters `cancelling`, then `cancelled` when the runner exits. Only one turn runs per session at a time. Completed turns provide the conversation history for later turns in the same session.
+`POST /turns` returns `202` with a running turn. Poll the turn or subscribe to events until it becomes `completed`, `failed`, or `cancelled`. Each session can run one turn at a time. To cancel, `POST /v1/agents/sessions/{sessionID}/turns/{turnID}/cancel`; the turn stays `cancelling` and the session remains busy until its worker exits. Event sequence numbers are per session. SSE clients can reconnect with `Last-Event-ID` or `?after=<sequence>`; the query parameter takes precedence.
 
-## Structure
+The full HTTP contract is in [`api/openapi.yaml`](api/openapi.yaml).
+
+## Code layout
 
 | Path | Responsibility |
 | --- | --- |
-| `cmd/redy-api` | Process startup, HTTP server, graceful shutdown |
-| `internal/httpapi` | Versioned HTTP routes, JSON validation, SSE |
-| `internal/agents/service.go` | Session/turn lifecycle and event log |
-| `internal/agents/runner.go` | Agent loop and `Runner`, `Model`, `Tool` interfaces |
-| `api/openapi.yaml` | HTTP contract |
+| `src/main/java/io/github/yangjjiso/redyagents/core` | Session/turn state, event log, model and tool loop |
+| `src/main/java/io/github/yangjjiso/redyagents/web` | HTTP endpoints, JSON errors, SSE |
+| `src/test/java` | API and lifecycle tests |
+| `api/openapi.yaml` | API contract |
 
-Replace `DemoModel` in `cmd/redy-api/main.go` with a model adapter implementing `agents.Model`. Register tools with `LoopRunner.Tools`. For a production service, replace the in-memory state/event log behind `Service` with durable storage and a job executor, and add authentication, tenant isolation, limits, observability, and a tool sandbox. The current code has no provider integration, durable state, tool sandbox, or authentication. It binds only to loopback unless `REDY_ADDR` is changed.
+The core's `Model` and `Tool` interfaces are the extension points for providers and actions. `LoopRunner` passes conversation history and tool results back into the model, and enforces a step limit. The HTTP layer does not depend on a particular provider.
 
-## Verify
+## Scope
 
-```sh
-go test ./...
-go test -race ./...
-```
+This is an in-memory starter, not a production deployment. Sessions and events disappear when the process exits. It has no authentication, tenant isolation, durable job queue, provider integration, tool sandbox, or context compaction. The default bind address is loopback; add those controls before exposing the server to other machines.
