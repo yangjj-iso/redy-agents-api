@@ -1,6 +1,6 @@
 # Architecture
 
-Redy Agents API is a Java 17 Agents API subset. The default `demo` model returns text and does not request tools. The boundaries below let a model adapter and sandbox provider be replaced without changing the HTTP controller.
+Redy Agents API is a Java 17 Agents API subset. The default `demo` model returns text and does not request tools. An optional OpenAI-compatible Chat Completions adapter can use the registered tools; the controller remains provider independent.
 
 ```mermaid
 flowchart LR
@@ -11,6 +11,7 @@ flowchart LR
     Snapshots --> Snapshot[SessionSnapshot]
     Service --> Provisioner[SandboxProvisioner]
     Runner --> Model[Model]
+    Model --> Provider[Chat Completions provider]
     Runner --> Tools[Tool registry]
     Runner --> Context[ContextWindow]
     Tools --> MCP[McpToolRegistry]
@@ -31,6 +32,7 @@ flowchart LR
 | HTTP | `web` | Request validation, response mapping, event stream transport |
 | Session orchestration | `core.AgentService`, `core.TurnExecution` | Session and turn transitions, worker scheduling, worker execution, event ordering, recovery decisions |
 | Harness | `core.Runner`, `core.ResumableRunner`, `core.LoopRunner` | Model/tool loop, checkpoints, context budget, duplicate-call handling |
+| Model adapter | `core.OpenAiCompatibleModel` | Serialize prompt and function tools, call a configured Chat Completions endpoint, parse text or one tool call |
 | Persistence | `core.SessionSnapshot`, `core.SessionSnapshotRepository`, `core.SessionStore` | Snapshot schema, encoding, and durable storage; the file implementation writes one snapshot per session |
 | Sandbox port | `core.SandboxProvisioner`, `core.SandboxToolBackend` | Provider-independent lifecycle and tool operations |
 | Cube adapter | `cube.CubeSandboxBackend`, `cube.SandboxTools` | Bind a session's sandbox ID to the ports and the shell/file tools |
@@ -50,11 +52,19 @@ The [OpenAPI contract](../api/openapi.yaml) describes the HTTP surface. `environ
 
 ## Extension points
 
-- Provide one Spring `Model` bean to replace `DemoModel`; when none is registered, composition uses the demo implementation.
+- Set `redy.model.base-url` and `redy.model.api-key` to register the Chat Completions adapter, or provide a custom Spring `Model` bean. Without either, composition uses `DemoModel`. The model ID comes from each session's `AgentConfig.model`.
 - Register a Spring `Runner` bean for a simple one-shot turn or `ResumableRunner` for checkpointed function handoff and restart recovery. The default runner is `LoopRunner`.
 - Register tools in the `LoopRunner` tool map. A tool may validate arguments and results; `ToolFailure` is returned to the model as feedback. Shell exit codes are command results, including nonzero codes.
 - Configure `redy.mcp.servers` for external stdio or Streamable HTTP tools. The Spring composition root creates a `McpToolRegistry` bean, discovers tools at startup, and merges them into the default runner. A custom runner can inject that registry and decide which tools to expose. The demo model does not call tools.
 - Register a Spring `SessionStore` bean to replace the local file store. Register `SandboxProvisioner` and a suitable runner/tool backend to replace CubeSandbox.
+
+## TokenHub and Kimi K3 model state
+
+The Java adapter accepts an OpenAI-compatible base URL. For a Tencent TokenHub enterprise plan/v3 deployment, `https://tokenhub.tencentmaas.com/plan/v3` is the documented Guangzhou base URL; `OpenAiCompatibleModel` appends `/chat/completions`. A session selects `kimi-k3` through `AgentConfig.model`, subject to the configured key's model access. The [README](../README.md#remote-model) shows a private local environment file outside the repository; Spring reads the exported variables when Maven starts and does not load that file itself. The endpoint and model availability are deployment settings, not harness constants. See the [TokenHub plan documentation](https://cloud.tencent.com/document/product/1823/130659) and [Kimi calling guide](https://cloud.tencent.com/document/product/1823/132232).
+
+For the exact model ID `kimi-k3`, the adapter maps `AgentConfig.maxOutputTokens` to `max_completion_tokens`. Other models receive `max_tokens`. The same `maxOutputTokens` value is also reserved by `ContextWindow` before assembling the prompt, with an additional 128-token safety margin. The demo defaults of 4,096 context and 512 output tokens are small for K3 because reasoning and the final answer consume the same completion allowance. An illustrative K3 session can use 65,536 context and 16,384 output tokens, leaving an estimated 49,024-token prompt budget. This estimator is based on UTF-8 bytes, not the provider's tokenizer; a model-specific tokenizer and compressor remain extension points.
+
+The adapter reads `reasoning_content` and, when present, `reasoning_details` from an assistant response into `Decision.modelState`. `LoopRunner` attaches that state to the assistant `Message` for final text and tool calls. The session snapshot stores those messages; the next Chat Completions request writes the retained reasoning fields back with the assistant message and pairs a tool result using `tool_call_id`. This supports K3's multi-turn and tool-call continuity for the text/function subset while those messages remain in model context; unknown provider-specific assistant fields are not replayed. `ContextWindow` includes model state in its budget and may compact older messages. The adapter is nonstreaming, so it does not expose live reasoning deltas. Snapshot files can contain reasoning text and should be protected like conversation content.
 
 ## MCP lifecycle and trust boundary
 

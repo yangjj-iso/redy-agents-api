@@ -166,7 +166,8 @@ public final class LoopRunner implements ResumableRunner {
                 String response = decision.message() == null ? "" : decision.message();
                 List<String> steering = step >= maxSteps ? List.of() : drainSteering(emit);
                 cancellation.throwIfCancelled();
-                Message assistant = new Message("assistant", response);
+                Message assistant = new Message("assistant", response, "", null, null, null,
+                        decision.modelState());
                 messages.add(assistant);
                 emit.record(assistant);
                 if (!steering.isEmpty()) {
@@ -204,7 +205,7 @@ public final class LoopRunner implements ResumableRunner {
                         appendToolExchange(messages, decision, call, cached.toolMessage(),
                                 cached.success(), emit, legacyMessages);
                     } else {
-                        appendRejectedCall(messages, cached.toolMessage(), emit);
+                        appendRejectedCall(messages, cached.toolMessage(), decision, emit);
                     }
                     continue;
                 }
@@ -228,7 +229,7 @@ public final class LoopRunner implements ResumableRunner {
                     if (previousFailure.dispatched()) {
                         appendToolExchange(messages, decision, call, feedback, false, emit, legacyMessages);
                     } else {
-                        appendRejectedCall(messages, feedback, emit);
+                        appendRejectedCall(messages, feedback, decision, emit);
                     }
                     continue;
                 }
@@ -252,7 +253,7 @@ public final class LoopRunner implements ResumableRunner {
                 if (call.callId() != null) {
                     callsById.put(call.callId(), new LoopCheckpoint.CachedCall(signature, feedback, false, false));
                 }
-                appendRejectedCall(messages, feedback, emit);
+                appendRejectedCall(messages, feedback, decision, emit);
                 continue;
             } catch (RuntimeException failure) {
                 emit.emit("tool.call.failed", eventData(call, "error",
@@ -326,8 +327,10 @@ public final class LoopRunner implements ResumableRunner {
         appendToolResult(messages, call, toolMessage, success, emit, legacyMessages);
     }
 
-    private static void appendRejectedCall(List<Message> messages, String feedback, EventEmitter emit) {
-        Message message = new Message("assistant", feedback);
+    private static void appendRejectedCall(List<Message> messages, String feedback,
+                                           Decision decision, EventEmitter emit) {
+        Message message = new Message("assistant", feedback, "", null, null, null,
+                decision.modelState());
         messages.add(message);
         emit.record(message);
     }
@@ -335,9 +338,11 @@ public final class LoopRunner implements ResumableRunner {
     private static void appendToolCall(List<Message> messages, Decision decision, ToolCall call,
                                        EventEmitter emit, boolean legacyMessages) {
         Message message = legacyMessages
-                ? new Message("assistant", decision.message() == null ? "" : decision.message())
+                ? new Message("assistant", decision.message() == null ? "" : decision.message(),
+                        "", null, null, null, decision.modelState())
                 : new Message("assistant", decision.message() == null ? "" : decision.message(),
-                        call.name(), call.callId(), Base64.getEncoder().encodeToString(call.arguments()), null);
+                        call.name(), call.callId(), Base64.getEncoder().encodeToString(call.arguments()), null,
+                        decision.modelState());
         messages.add(message);
         emit.record(message);
     }

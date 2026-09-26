@@ -5,6 +5,7 @@ import io.github.yangjjiso.redyagents.core.DemoModel;
 import io.github.yangjjiso.redyagents.core.FileSessionStore;
 import io.github.yangjjiso.redyagents.core.LoopRunner;
 import io.github.yangjjiso.redyagents.core.Model;
+import io.github.yangjjiso.redyagents.core.OpenAiCompatibleModel;
 import io.github.yangjjiso.redyagents.core.Runner;
 import io.github.yangjjiso.redyagents.core.SandboxProvisioner;
 import io.github.yangjjiso.redyagents.core.SessionStore;
@@ -20,14 +21,27 @@ import java.util.Map;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /** Spring composition root; the harness and Cube client remain framework independent. */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({CubeSandboxProperties.class, McpProperties.class})
+@EnableConfigurationProperties({CubeSandboxProperties.class, McpProperties.class,
+        ModelProperties.class})
 public class RedyAgentsConfiguration {
+    @Bean
+    @ConditionalOnProperty(name = "redy.model.base-url")
+    @ConditionalOnMissingBean(Model.class)
+    Model openAiCompatibleModel(ModelProperties properties) {
+        if (properties.apiKey() == null || properties.apiKey().isBlank()) {
+            throw new IllegalArgumentException("redy.model.api-key is required when base-url is set");
+        }
+        return new OpenAiCompatibleModel(properties.baseUrl(), properties.apiKey(),
+                properties.requestTimeout());
+    }
+
     @Bean
     @ConditionalOnProperty(name = "redy.cube.enabled", havingValue = "true")
     CubeSandboxBackend cubeSandboxBackend(CubeSandboxProperties properties) {

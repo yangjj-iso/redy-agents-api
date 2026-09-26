@@ -153,6 +153,25 @@ class ContextWindowTest {
     }
 
     @Test
+    void countsPrivateModelStateAndDropsItWithAnOldTurn() {
+        Message assistant = new Message("assistant", "reply", "", null, null, null,
+                Map.of("reasoning_content", "x".repeat(200)));
+        List<Message> withState = List.of(new Message("user", "earlier"), assistant,
+                new Message("user", "now"));
+        List<Message> withoutState = List.of(new Message("user", "earlier"),
+                new Message("assistant", "reply"), new Message("user", "now"));
+
+        int statefulCost = window.fit(withState, "", 1000).estimatedTokens();
+        int plainCost = window.fit(withoutState, "", 1000).estimatedTokens();
+        ContextWindow.Result fitted = window.fit(withState, "", 90);
+
+        assertTrue(statefulCost > plainCost + 200);
+        assertEquals(2, fitted.omittedMessages());
+        assertTrue(fitted.messages().stream().noneMatch(message -> !message.modelState().isEmpty()));
+        assertEquals(assistant.modelState(), assistant.withContent("shorter").modelState());
+    }
+
+    @Test
     void rejectsToolCatalogThatLeavesNoRoomForLatestUserInput() {
         ToolDefinition large = new ToolDefinition("search", "x".repeat(200),
                 Map.of("type", "object"));

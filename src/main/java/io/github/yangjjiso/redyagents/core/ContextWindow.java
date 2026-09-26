@@ -210,7 +210,19 @@ public final class ContextWindow {
     private long messageCost(Message message) {
         return MESSAGE_OVERHEAD + textCost(message.role()) + textCost(message.tool())
                 + textCost(message.content()) + textCost(message.callId())
-                + textCost(message.argumentsBase64()) + (message.success() == null ? 0 : 1);
+                + textCost(message.argumentsBase64()) + modelStateCost(message.modelState())
+                + (message.success() == null ? 0 : 1);
+    }
+
+    private long modelStateCost(Map<String, Object> modelState) {
+        if (modelState.isEmpty()) {
+            return 0;
+        }
+        try {
+            return textCost(JSON.writeValueAsString(modelState));
+        } catch (JacksonException failure) {
+            throw new IllegalArgumentException("cannot estimate model state", failure);
+        }
     }
 
     private long textCost(String text) {

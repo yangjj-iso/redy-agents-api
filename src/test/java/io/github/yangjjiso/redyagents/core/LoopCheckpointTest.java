@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import tools.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -15,8 +16,39 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class LoopCheckpointTest {
+    @Test
+    @SuppressWarnings("unchecked")
+    void loadsOldSnapshotWhoseMessagesHaveNoModelState(@TempDir Path directory) throws Exception {
+        Message user = new Message("user", "old input");
+        Session session = session();
+        SessionSnapshot snapshot = new SessionSnapshot(session, List.of(), List.of(user),
+                List.of(user), List.of(), List.of(),
+                new LoopCheckpoint(List.of(user), 0, Map.of(), Map.of(), null),
+                Map.of(), List.of(), false);
+        ObjectMapper mapper = new ObjectMapper();
+        Map<String, Object> oldJson = mapper.readValue(mapper.writeValueAsBytes(snapshot), Map.class);
+        for (String field : List.of("context", "executionMessages")) {
+            for (Object item : (List<?>) oldJson.get(field)) {
+                ((Map<String, Object>) item).remove("modelState");
+            }
+        }
+        Map<String, Object> checkpoint = (Map<String, Object>) oldJson.get("checkpoint");
+        for (Object item : (List<?>) checkpoint.get("messages")) {
+            ((Map<String, Object>) item).remove("modelState");
+        }
+        FileSessionStore store = new FileSessionStore(directory);
+        store.save(session.id(), mapper.writeValueAsBytes(oldJson));
+
+        SessionSnapshot restored = new SessionSnapshotRepository(store).loadAll().get(session.id());
+
+        assertEquals(Map.of(), restored.context().get(0).modelState());
+        assertEquals(Map.of(), restored.executionMessages().get(0).modelState());
+        assertEquals(Map.of(), restored.checkpoint().messages().get(0).modelState());
+    }
+
     @Test
     void externalCallSurvivesJsonRoundTripAndResumesWithoutExecutingTool() throws Exception {
         AtomicInteger modelCalls = new AtomicInteger();

@@ -2,7 +2,7 @@
 
 Java 17 / Spring Boot Agents API starter. It provides asynchronous turns, session input events, saved items, cancellation, and Server-Sent Events (SSE). A replaceable model and tool loop sits behind the HTTP API.
 
-The bundled `demo` model makes no network calls and returns `Demo response: <input>`. This keeps the API runnable without credentials while a real model adapter is being developed.
+The bundled `demo` model makes no network calls and returns `Demo response: <input>`. An optional OpenAI-compatible Chat Completions adapter can call a configured provider and use registered tools.
 
 ## Run
 
@@ -39,6 +39,40 @@ Creating a session with `input` starts its first turn. `POST /events` accepts `a
 
 The event stream exposes the [Agents API session, turn, item, and output-text event names](https://developers.openai.com/api/docs/guides/agents-api/sessions/events) for the supported text and function subset. For example, `agent.session.turn.output_text.delta` has `item_id`, `output_index`, `content_index`, and `delta`; the matching `.done` has the complete `text`. Every event has a stable `event_id`. `agent.session.turn.completed`, `.failed`, and `.cancelled` include the terminal `turn`; `agent.session.requires_action` and `agent.session.idle` include a `session` snapshot. The demo model returns text in one chunk, so its delta is emitted after the model returns. Existing `turn.*`, `message.delta`, `tool.call.*`, and `context.compacted` events and the nested `data` field remain available for older clients. The replay cursor and extra envelope fields are local extensions; OpenAI's live stream does not replay missed events.
 
+## Remote model
+
+Set these environment variables before starting the service to enable the Java Chat Completions adapter. For local development, keep a shell environment file outside the repository, for example `$HOME/.config/redy-agents-api/model.env`:
+
+```sh
+REDY_MODEL_BASE_URL=https://tokenhub.tencentmaas.com/plan/v3
+REDY_MODEL_API_KEY=replace-with-your-own-key
+REDY_MODEL_REQUEST_TIMEOUT=120s
+```
+
+Load that private file into the shell that starts Maven:
+
+```sh
+chmod 600 "$HOME/.config/redy-agents-api/model.env"
+set -a
+. "$HOME/.config/redy-agents-api/model.env"
+set +a
+mvn spring-boot:run
+```
+
+The URL above is the [Tencent TokenHub enterprise Guangzhou OpenAI-compatible base URL](https://cloud.tencent.com/document/product/1823/130659); the adapter appends `/chat/completions`. The local environment file is an example: Spring does not load it automatically, and it must contain your own key. Supply a model ID allowed by that key as `agent.model`; Tencent's [quickstart](https://cloud.tencent.com/document/product/1823/130660) explains that a key can call only its selected models. Keep credentials out of committed configuration. When `REDY_MODEL_BASE_URL` is absent, the bundled demo model remains the default; a custom Spring `Model` bean can also replace either default.
+
+For a TokenHub plan/v3 key with access to `kimi-k3`, start a session with a larger budget than the demo defaults:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":{"name":"k3","model":"kimi-k3","context_window_tokens":65536,"max_output_tokens":16384},"input":"Explain this project architecture."}'
+```
+
+For `kimi-k3`, the adapter sends `max_completion_tokens` with the agent's `max_output_tokens`; other model IDs use `max_tokens`. K3 keeps reasoning enabled and its reasoning and final answer share that output allowance. The example reserves 16,384 output tokens and leaves an approximate 49,024-token prompt budget after the harness's 128-token margin. Tune both values for the task, provider limits, latency, and cost. The harness estimates tokens from UTF-8 bytes rather than K3's tokenizer, so these are approximate application budgets, not a claim about the provider's full context limit. See [Tencent's Kimi guide](https://cloud.tencent.com/document/product/1823/132232) for current K3 parameters.
+
+The adapter sends the current instructions, conversation, tool definitions, tool calls, and tool results in one nonstreaming request per loop step. It saves returned `reasoning_content` and, when present, `reasoning_details` alongside each retained assistant message and includes those fields on later steps, including after tool calls. This supports the [multi-turn reasoning continuity described by Tencent](https://cloud.tencent.com/document/product/1823/132232) for the adapter's text/function subset; unknown provider-specific message fields are not replayed. Context compaction can still remove older messages, so continuity is limited to the retained model context. The reasoning fields are stored in local session snapshots; protect the session data directory. The adapter requests a single tool call at a time; a provider response with multiple simultaneous calls fails the turn rather than dropping calls. The HTTP request timeout defaults to 60 seconds; the example raises it to 120 seconds for slower reasoning requests. Because the provider response is nonstreaming, output deltas are emitted after each model response arrives.
+
 ## MCP tools
 
 Configure `redy.mcp.servers` to add tools from trusted MCP servers to the default `LoopRunner`. Both local stdio processes and remote Streamable HTTP endpoints use the [official MCP Java SDK](https://java.sdk.modelcontextprotocol.io/latest/client/). For example, add these settings to a deployment's Spring `application.yaml`:
@@ -69,7 +103,7 @@ At startup, the registry connects to every configured server, discovers its tool
 
 Tool execution returns a single MCP text block as text, and encodes multiple blocks or `structuredContent` as JSON for the model. Large multi-block or structured results become a valid JSON object with `truncated: true` and a `preview`; large single text blocks get a truncated text preview. Binary image, audio, and resource data are omitted; their MIME type and other metadata remain visible. An MCP `isError: true` result becomes recoverable tool feedback so the model can correct the next call. A request timeout ends the local wait; the [Java SDK does not yet send MCP cancellation notifications](https://java.sdk.modelcontextprotocol.io/latest/client/#request-timeouts-and-cancellation), so the remote operation may continue. Only tool discovery and calls are exposed through this integration; MCP resources, prompts, sampling, elicitation, and a hosted MCP endpoint are outside its current scope.
 
-The bundled `demo` model never calls tools, so use a model adapter that emits tool calls to exercise them during a turn. Stdio servers execute on the Java service host, with its process permissions, outside CubeSandbox. Their child process environment is cleared before launch; they receive only explicitly configured `env` values plus the SDK's default set such as `PATH` and `HOME`. Configure only servers you trust and grant each the minimum host access and credentials it needs. Use HTTPS for remote servers outside a trusted local network.
+The bundled `demo` model never calls tools; the configured Chat Completions adapter can call them during a turn. Stdio servers execute on the Java service host, with its process permissions, outside CubeSandbox. Their child process environment is cleared before launch; they receive only explicitly configured `env` values plus the SDK's default set such as `PATH` and `HOME`. Configure only servers you trust and grant each the minimum host access and credentials it needs. Use HTTPS for remote servers outside a trusted local network.
 
 ## CubeSandbox environment
 
@@ -100,7 +134,7 @@ curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment
 
 The session response includes `environment.type`, `sandbox_id`, `template_id`, and `status`. The sandbox ID survives a service restart and is reused across turns. Pause, resume, and kill require no active turn; paused or killed environments reject new turns. A failed lifecycle request can leave a durable `pausing`, `resuming`, or `killing` status. Retry that same endpoint to reconcile it. Killing a sandbox ends its compute and ephemeral files while leaving the session history readable.
 
-When enabled, the harness registers `sandbox.shell` (`{"command":"pwd","timeout_ms":30000}`), `sandbox.read_file` (`{"path":"/workspace/note.txt"}`), and `sandbox.write_file` (`{"path":"/workspace/note.txt","content":"hello"}`). These tools route only to the session's CubeSandbox. Shell returns `exit_code`, stdout, and stderr even when the command exits nonzero; the model decides what to do next. File tools handle UTF-8 text up to 1 MiB. The bundled `demo` model never asks for tools, so a future model adapter must emit these tool calls to use them during a turn. There is no direct public shell endpoint.
+When enabled, the harness registers `sandbox.shell` (`{"command":"pwd","timeout_ms":30000}`), `sandbox.read_file` (`{"path":"/workspace/note.txt"}`), and `sandbox.write_file` (`{"path":"/workspace/note.txt","content":"hello"}`). These tools route only to the session's CubeSandbox. Shell returns `exit_code`, stdout, and stderr even when the command exits nonzero; the model decides what to do next. File tools handle UTF-8 text up to 1 MiB. The bundled `demo` model never asks for tools; configure a model that emits tool calls to use them during a turn. There is no direct public shell endpoint.
 
 ## Function results and recovery
 
@@ -122,7 +156,7 @@ An agent can set `context_window_tokens` (default `4096`) and `max_output_tokens
 
 Before every model call, `LoopRunner` fits the model's input into that budget. If prior turns do not fit, it creates a role-labeled extractive summary of older messages and trims the model-input view as needed. It emits `context.compacted` only when it actually summarizes or trims; the event data includes `step`, `estimated_prompt_tokens`, `prompt_budget_tokens`, and `omitted_messages`. A successful turn saves the compacted model context in the session for the next turn; original completed turns remain available as records. If the latest user input alone cannot fit, the asynchronous turn becomes `failed` after the request accepting that input returns.
 
-The bundled estimator uses UTF-8 byte counts plus message overhead, not the model's exact token count. `max_output_tokens` is currently a prompt reserve; the demo model does not enforce a generation limit. The bundled extractive summary is a demo fallback, not the model- or server-generated semantic compaction used by Codex. A provider integration can inject its own tokenizer and compressor.
+The bundled estimator uses UTF-8 byte counts plus message overhead, not the model's exact token count. `max_output_tokens` reserves prompt space; the demo model does not enforce a generation limit, while the Chat Completions adapter sends it as the provider's output cap (`max_completion_tokens` for `kimi-k3`, `max_tokens` otherwise). K3's reasoning and answer share that cap. The bundled extractive summary is a demo fallback, not the model- or server-generated semantic compaction used by Codex. A provider integration can inject its own tokenizer and compressor.
 
 ## Tool failures and replay
 
@@ -150,4 +184,4 @@ The core's `Model` and `Tool` interfaces are the extension points for providers 
 
 ## Scope
 
-This is a demo-model starter and an Agents API-style subset, not a complete Codex harness or a production deployment. It has no authentication, tenant isolation, model provider integration, subagents, programmatic JavaScript tool calling, exact tokenizer, or model-based context compressor. The MCP integration currently covers client-side tools only. The CubeSandbox integration has protocol-level mock tests but has not been verified against a live cluster in this environment. Creating a sandbox and saving its first session snapshot are separate operations; a process crash between them can leave an orphan sandbox. The local file store provides restart recovery but is not a distributed job queue. The default bind address is loopback; add the missing controls before exposing the server to other machines.
+This is an Agents API-style subset, not a complete Codex harness or a production deployment. It has no authentication, tenant isolation, subagents, programmatic JavaScript tool calling, exact tokenizer, or model-based context compressor. The model adapter supports nonstreaming OpenAI-compatible Chat Completions only. The MCP integration currently covers client-side tools only. The CubeSandbox integration has protocol-level mock tests but has not been verified against a live cluster in this environment. Creating a sandbox and saving its first session snapshot are separate operations; a process crash between them can leave an orphan sandbox. The local file store provides restart recovery but is not a distributed job queue. The default bind address is loopback; add the missing controls before exposing the server to other machines.
