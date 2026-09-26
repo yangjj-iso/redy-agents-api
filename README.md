@@ -15,34 +15,7 @@ mvn spring-boot:run
 
 The server listens on `127.0.0.1:8080` by default. Set `REDY_HOST` and `REDY_PORT` to change that address. Session state is saved in `./.redy-data` by default; set `REDY_DATA_DIR` or `redy.data-dir` to use another directory.
 
-## CubeSandbox environment
-
-An optional CubeSandbox backend gives each `environment.type: "cube"` session its own remote microVM. A [CubeSandbox cluster](https://docs.cubesandbox.com/guide/quickstart) must run on a Linux KVM host; this Java service can connect to it from macOS or another machine. The chosen template must include envd for command and file operations. Configure the CubeAPI URL and either a CubeProxy address for [path routing](https://docs.cubesandbox.com/guide/https-and-domain#path-based-quick-access-no-dns--cert), or CubeSandbox's virtual-host DNS:
-
-```sh
-export REDY_CUBE_ENABLED=true
-export CUBE_API_URL=http://cube-api-host:3000
-export CUBE_TEMPLATE_ID=your-template-id
-export CUBE_PROXY_NODE_IP=cube-proxy-host
-export CUBE_PROXY_PORT_HTTP=80
-mvn spring-boot:run
-```
-
-`CUBE_API_KEY` supplies a bearer token when CubeAPI authentication is configured. If `CUBE_PROXY_NODE_IP` is omitted, set `CUBE_SANDBOX_DOMAIN` and route `49983-<sandbox-id>.<domain>` through CubeProxy. `CUBE_PROXY_SCHEME` selects `http` or `https`; `CUBE_REQUEST_TIMEOUT` controls request timeouts. `CUBE_SANDBOX_IDLE_SECONDS` defaults to `300`. New sandboxes request pause on timeout and auto-resume; command and file operations reconnect before use. Internet egress is denied by default using `network.denyOut`; set `CUBE_ALLOW_INTERNET_ACCESS=true` only when the session needs it. The client does not enable CubeSandbox's private inbound traffic mode: CubeAPI returns its traffic token only at creation, and durable token storage is not implemented. Restrict CubeProxy and CubeAPI access at the cluster boundary. Protect this service before exposing it outside a trusted network.
-
-```sh
-curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions \
-  -H 'Content-Type: application/json' \
-  -d '{"agent":{"name":"example","model":"demo"},"environment":{"type":"cube"}}'
-
-curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/pause
-curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/resume
-curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/kill
-```
-
-The session response includes `environment.type`, `sandbox_id`, `template_id`, and `status`. The sandbox ID survives a service restart and is reused across turns. Pause, resume, and kill require no active turn; paused or killed environments reject new turns. A failed lifecycle request can leave a durable `pausing`, `resuming`, or `killing` status. Retry that same endpoint to reconcile it. Killing a sandbox ends its compute and ephemeral files while leaving the session history readable.
-
-When enabled, the harness registers `sandbox.shell` (`{"command":"pwd","timeout_ms":30000}`), `sandbox.read_file` (`{"path":"/workspace/note.txt"}`), and `sandbox.write_file` (`{"path":"/workspace/note.txt","content":"hello"}`). These tools route only to the session's CubeSandbox; shell nonzero exit codes become tool failures with stdout and stderr feedback. File tools handle UTF-8 text up to 1 MiB. The bundled `demo` model never asks for tools, so a future model adapter must emit these tool calls to use them during a turn. There is no direct public shell endpoint.
+## API quickstart
 
 ```sh
 curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions \
@@ -65,6 +38,37 @@ Creating a session with `input` starts its first turn. `POST /events` accepts `a
 `GET /items` and `GET /turns` return all saved root-agent records in creation order using a `{ "data": [...], "first_id": ..., "last_id": ..., "has_more": false }` envelope. Pagination is not yet implemented. The earlier `POST /turns`, `GET /turns/{turnID}`, and `POST /turns/{turnID}/cancel` endpoints remain available. Event sequence numbers are per session. This implementation's SSE and JSON event endpoints can replay events using `Last-Event-ID` or `?after=<sequence>`; the query parameter takes precedence.
 
 The event stream exposes the [Agents API session, turn, item, and output-text event names](https://developers.openai.com/api/docs/guides/agents-api/sessions/events) for the supported text and function subset. For example, `agent.session.turn.output_text.delta` has `item_id`, `output_index`, `content_index`, and `delta`; the matching `.done` has the complete `text`. Every event has a stable `event_id`. `agent.session.turn.completed`, `.failed`, and `.cancelled` include the terminal `turn`; `agent.session.requires_action` and `agent.session.idle` include a `session` snapshot. The demo model returns text in one chunk, so its delta is emitted after the model returns. Existing `turn.*`, `message.delta`, `tool.call.*`, and `context.compacted` events and the nested `data` field remain available for older clients. The replay cursor and extra envelope fields are local extensions; OpenAI's live stream does not replay missed events.
+
+## CubeSandbox environment
+
+An optional CubeSandbox backend gives each `environment.type: "cube"` session its own remote microVM. A [CubeSandbox cluster](https://docs.cubesandbox.com/guide/quickstart) must run on a Linux KVM host; this Java service can connect to it from macOS or another machine. The chosen template must include envd for command and file operations. Configure the CubeAPI URL and either a CubeProxy address for [path routing](https://docs.cubesandbox.com/guide/https-and-domain#path-based-quick-access-no-dns--cert), or CubeSandbox's virtual-host DNS:
+
+```sh
+export REDY_CUBE_ENABLED=true
+export CUBE_API_URL=http://cube-api-host:3000
+export CUBE_TEMPLATE_ID=your-template-id
+export CUBE_PROXY_NODE_IP=cube-proxy-host
+export CUBE_PROXY_PORT_HTTP=80
+mvn spring-boot:run
+```
+
+`CUBE_API_KEY` supplies a bearer token when CubeAPI authentication is configured. If `CUBE_PROXY_NODE_IP` is omitted, set `CUBE_SANDBOX_DOMAIN` and route `49983-<sandbox-id>.<domain>` through CubeProxy. `CUBE_PROXY_SCHEME` selects `http` or `https`; `CUBE_REQUEST_TIMEOUT` controls request timeouts. `CUBE_SANDBOX_IDLE_SECONDS` defaults to `300`. New sandboxes request pause on timeout and auto-resume; command and file operations reconnect before use. Internet egress is denied by default using `network.denyOut`; set `CUBE_ALLOW_INTERNET_ACCESS=true` only when the session needs it. The client does not enable CubeSandbox's private inbound traffic mode: CubeAPI returns its traffic token only at creation, and durable token storage is not implemented. Restrict CubeProxy and CubeAPI access at the cluster boundary. Protect this service before exposing it outside a trusted network.
+
+The environment variables map to `redy.cube.*` Spring properties, so deployments and tests can override them through Spring configuration. `CUBE_REQUEST_TIMEOUT` accepts a duration such as `30s`; a bare number is interpreted as seconds.
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":{"name":"example","model":"demo"},"environment":{"type":"cube"}}'
+
+curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/pause
+curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/resume
+curl -sS -X POST http://127.0.0.1:8080/v1/agents/sessions/SESSION_ID/environment/kill
+```
+
+The session response includes `environment.type`, `sandbox_id`, `template_id`, and `status`. The sandbox ID survives a service restart and is reused across turns. Pause, resume, and kill require no active turn; paused or killed environments reject new turns. A failed lifecycle request can leave a durable `pausing`, `resuming`, or `killing` status. Retry that same endpoint to reconcile it. Killing a sandbox ends its compute and ephemeral files while leaving the session history readable.
+
+When enabled, the harness registers `sandbox.shell` (`{"command":"pwd","timeout_ms":30000}`), `sandbox.read_file` (`{"path":"/workspace/note.txt"}`), and `sandbox.write_file` (`{"path":"/workspace/note.txt","content":"hello"}`). These tools route only to the session's CubeSandbox. Shell returns `exit_code`, stdout, and stderr even when the command exits nonzero; the model decides what to do next. File tools handle UTF-8 text up to 1 MiB. The bundled `demo` model never asks for tools, so a future model adapter must emit these tool calls to use them during a turn. There is no direct public shell endpoint.
 
 ## Function results and recovery
 
@@ -96,15 +100,15 @@ When a model repeats a `callId`, the runner replays that call's result or error 
 
 For local tools, the harness saves the function call, arguments, and generated `call_id` before dispatch. If execution ends without a tool result, cancellation or recovery adds a failed output item for reconciliation. The persisted record cannot prove whether an interrupted external side effect occurred.
 
-The full HTTP contract is in [`api/openapi.yaml`](api/openapi.yaml).
+The full HTTP contract is in [`api/openapi.yaml`](api/openapi.yaml). The [architecture guide](docs/architecture.md) shows the boundaries and request flow.
 
 ## Code layout
 
 | Path | Responsibility |
 | --- | --- |
-| `src/main/java/io/github/yangjjiso/redyagents/core` | Session/turn state, local store, event log, model and tool loop |
-| `src/main/java/io/github/yangjjiso/redyagents/cube` | CubeAPI, CubeProxy, and envd Connect protocol client |
-| `src/main/java/io/github/yangjjiso/redyagents/CubeSandboxBackend.java` | Adapter from CubeSandbox client to session lifecycle and tools |
+| `src/main/java/io/github/yangjjiso/redyagents/config` | Spring configuration and deployment settings |
+| `src/main/java/io/github/yangjjiso/redyagents/core` | Session/turn state, snapshot store, model and tool interfaces, and harness loop |
+| `src/main/java/io/github/yangjjiso/redyagents/cube` | CubeSandbox adapter, tools, CubeAPI, CubeProxy, and envd Connect protocol |
 | `src/main/java/io/github/yangjjiso/redyagents/web` | HTTP endpoints, JSON errors, SSE |
 | `src/test/java` | API and lifecycle tests |
 | `api/openapi.yaml` | API contract |

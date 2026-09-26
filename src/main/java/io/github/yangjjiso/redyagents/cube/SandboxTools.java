@@ -1,5 +1,11 @@
-package io.github.yangjjiso.redyagents.core;
+package io.github.yangjjiso.redyagents.cube;
 
+import io.github.yangjjiso.redyagents.core.CancellationToken;
+import io.github.yangjjiso.redyagents.core.SandboxToolBackend;
+import io.github.yangjjiso.redyagents.core.SessionEnvironment;
+import io.github.yangjjiso.redyagents.core.Tool;
+import io.github.yangjjiso.redyagents.core.ToolExecutionContext;
+import io.github.yangjjiso.redyagents.core.ToolFailure;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
@@ -13,7 +19,7 @@ import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.ObjectReader;
 
-/** Local tools that route commands and file operations to the session's CubeSandbox. */
+/** Tools that route commands and file operations to the session's CubeSandbox. */
 public final class SandboxTools {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final ObjectReader ARGUMENT_READER = JSON.readerFor(Object.class)
@@ -182,11 +188,7 @@ public final class SandboxTools {
                     && output.stdout().length() > MAX_RESULT_CHARS);
             result.put("stderr_truncated", output.stderr() != null
                     && output.stderr().length() > MAX_RESULT_CHARS);
-            String encoded = json(result);
-            if (output.exitCode() != 0) {
-                throw new ToolFailure("sandbox command exited nonzero: " + encoded);
-            }
-            return encoded;
+            return json(result);
         }
     }
 

@@ -32,6 +32,56 @@ class AgentServicePersistenceTest {
 
     @Test
     @Timeout(10)
+    void resumableRunnerAdapterCanRestoreAndResumeExternalFunction() throws Exception {
+        Model model = (cancellation, agent, messages) ->
+                "tool".equals(messages.get(messages.size() - 1).role())
+                        ? Decision.finalMessage("resumed")
+                        : Decision.toolCall("lookup",
+                                new ToolCall("lookup", bytes("{}"), "call_adapter"));
+        LoopRunner delegate = new LoopRunner(model,
+                Map.of("lookup", new ExternalFunctionTool() {}), 3);
+        ResumableRunner adapter = new ResumableRunner() {
+            @Override
+            public String run(CancellationToken cancellation, Session session, List<Message> history,
+                              String input, EventEmitter emit) throws Exception {
+                return delegate.run(cancellation, session, history, input, emit);
+            }
+
+            @Override
+            public LoopCheckpoint start(List<Message> history, String input) {
+                return delegate.start(history, input);
+            }
+
+            @Override
+            public LoopProgress advance(CancellationToken cancellation, Session session,
+                                        LoopCheckpoint checkpoint, EventEmitter emit) throws Exception {
+                return delegate.advance(cancellation, session, checkpoint, emit);
+            }
+
+            @Override
+            public LoopCheckpoint resumeExternal(LoopCheckpoint checkpoint, ToolResult result,
+                                                 EventEmitter emit) {
+                return delegate.resumeExternal(checkpoint, result, emit);
+            }
+        };
+        Path snapshots = directory.resolve("adapter");
+        String sessionId;
+        String turnId;
+        try (AgentService original = new AgentService(adapter, new FileSessionStore(snapshots))) {
+            sessionId = original.createSession(new AgentConfig("test", "demo", "")).id();
+            turnId = original.startTurn(sessionId, "lookup").id();
+            assertEquals("requires_action", awaitSessionStatus(original, sessionId,
+                    "requires_action").status());
+        }
+        try (AgentService recovered = new AgentService(adapter, new FileSessionStore(snapshots))) {
+            recovered.submitToolResult(sessionId, turnId, "call_adapter", true, "found", null);
+            assertEquals("resumed", awaitTurnStatus(recovered, sessionId, turnId,
+                    "completed").output());
+        }
+    }
+
+    @Test
+    @Timeout(10)
     void externalFunctionCanResumeAfterRestartAndToolResultIsIdempotent() throws Exception {
         Path snapshots = directory.resolve("sessions");
         AtomicInteger modelCalls = new AtomicInteger();

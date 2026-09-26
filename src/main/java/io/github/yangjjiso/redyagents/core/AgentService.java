@@ -1,8 +1,6 @@
 package io.github.yangjjiso.redyagents.core;
 
 import java.security.SecureRandom;
-import java.io.IOException;
-import java.nio.channels.ClosedByInterruptException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -26,7 +24,8 @@ public final class AgentService implements AutoCloseable {
     private final Map<String, SessionState> sessions = new HashMap<>();
     private final SecureRandom random = new SecureRandom();
     private final Runner runner;
-    private final SessionStore store;
+    private final ResumableRunner resumableRunner;
+    private final SessionSnapshotRepository snapshots;
     private final SandboxProvisioner sandboxProvisioner;
     private final ObjectMapper json = new ObjectMapper();
     private final ExecutorService turnExecutor = Executors.newCachedThreadPool(daemonThreads("redy-turn-"));
@@ -50,7 +49,8 @@ public final class AgentService implements AutoCloseable {
             throw new IllegalArgumentException("runner is required");
         }
         this.runner = runner;
-        this.store = store;
+        this.resumableRunner = runner instanceof ResumableRunner resumable ? resumable : null;
+        this.snapshots = store == null ? null : new SessionSnapshotRepository(store);
         this.sandboxProvisioner = sandboxProvisioner;
         restore();
     }
@@ -262,8 +262,8 @@ public final class AgentService implements AutoCloseable {
             int previousEvents = state.events.size();
             int previousItems = state.items.size();
             LoopCheckpoint nextCheckpoint = null;
-            if (runner instanceof LoopRunner loop) {
-                nextCheckpoint = loop.start(state.context, input);
+            if (resumableRunner != null) {
+                nextCheckpoint = resumableRunner.start(state.context, input);
             }
             state.turns.put(turn.id(), turn);
             state.cancellation = cancellation;
@@ -305,7 +305,7 @@ public final class AgentService implements AutoCloseable {
         }
         List<Message> completedHistory = List.copyOf(history);
         try {
-            if (runner instanceof LoopRunner) {
+            if (resumableRunner != null) {
                 turnExecutor.execute(() -> runLoop(cancellation, runnerSession, checkpoint, turn));
             } else {
                 turnExecutor.execute(() -> runTurn(cancellation, runnerSession, completedHistory, turn));
@@ -373,7 +373,7 @@ public final class AgentService implements AutoCloseable {
                 || (!success && blank(error))) {
             throw invalid();
         }
-        if (!(runner instanceof LoopRunner loop)) {
+        if (resumableRunner == null) {
             throw conflict();
         }
         ToolResult result = new ToolResult(callId, success, output, error);
@@ -412,7 +412,7 @@ public final class AgentService implements AutoCloseable {
         };
         LoopCheckpoint checkpoint;
         try {
-            checkpoint = loop.resumeExternal(waitingCheckpoint, result, buffered);
+            checkpoint = resumableRunner.resumeExternal(waitingCheckpoint, result, buffered);
         } catch (RuntimeException | Error failure) {
             synchronized (lock) {
                 getState(sessionId).resultInFlight = false;
@@ -646,7 +646,7 @@ public final class AgentService implements AutoCloseable {
                     persist(state);
                 }
             }
-            LoopProgress progress = ((LoopRunner) runner).advance(
+            LoopProgress progress = resumableRunner.advance(
                     cancellation, session, checkpoint, emitter(turn));
             cancellation.throwIfCancelled();
             if (progress.isCompleted()) {
@@ -1106,17 +1106,12 @@ public final class AgentService implements AutoCloseable {
     }
 
     private void restore() {
-        if (store == null) {
+        if (snapshots == null) {
             return;
         }
         synchronized (lock) {
             try {
-                for (Map.Entry<String, byte[]> entry : store.loadAll().entrySet()) {
-                    Snapshot snapshot = json.readValue(entry.getValue(), Snapshot.class);
-                    if (snapshot == null || snapshot.session() == null
-                            || !entry.getKey().equals(snapshot.session().id())) {
-                        throw new IOException("invalid session snapshot: " + entry.getKey());
-                    }
+                for (Snapshot snapshot : snapshots.loadAll().values()) {
                     SessionState state = new SessionState(snapshot.session());
                     for (Turn turn : snapshot.turns()) {
                         state.turns.put(turn.id(), turn);
@@ -1156,7 +1151,7 @@ public final class AgentService implements AutoCloseable {
         }
         if ("in_progress".equals(turn.status()) && state.safeToResume
                 && state.checkpoint != null && state.checkpoint.pendingExternal() == null
-                && runner instanceof LoopRunner) {
+                && resumableRunner != null) {
             CancellationToken cancellation = new CancellationToken();
             state.cancellation = cancellation;
             Session session = state.session;
@@ -1220,35 +1215,14 @@ public final class AgentService implements AutoCloseable {
     }
 
     private void persist(SessionState state) {
-        if (store == null) {
+        if (snapshots == null) {
             return;
         }
         Snapshot snapshot = new Snapshot(state.session, List.copyOf(state.turns.values()),
                 state.context, List.copyOf(state.executionMessages), List.copyOf(state.events),
                 List.copyOf(state.items), state.checkpoint, Map.copyOf(state.toolResults),
                 List.copyOf(state.steering), List.copyOf(state.claimedSteering), state.safeToResume);
-        boolean restoreInterrupt = Thread.interrupted();
-        try {
-            byte[] bytes = json.writeValueAsBytes(snapshot);
-            for (int attempt = 0; attempt < 2; attempt++) {
-                try {
-                    store.save(state.session.id(), bytes);
-                    return;
-                } catch (ClosedByInterruptException interrupted) {
-                    restoreInterrupt = true;
-                    Thread.interrupted();
-                    if (attempt == 1) {
-                        throw interrupted;
-                    }
-                }
-            }
-        } catch (Exception failure) {
-            throw new IllegalStateException("cannot persist session " + state.session.id(), failure);
-        } finally {
-            if (restoreInterrupt) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        snapshots.save(snapshot);
     }
 
     public record Snapshot(Session session, List<Turn> turns, List<Message> context,

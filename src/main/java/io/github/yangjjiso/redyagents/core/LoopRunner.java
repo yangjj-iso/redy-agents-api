@@ -10,7 +10,7 @@ import java.util.UUID;
 import java.util.concurrent.CancellationException;
 
 /** Runs a model/tool turn, pausing at application-owned function calls. */
-public final class LoopRunner implements Runner {
+public final class LoopRunner implements ResumableRunner {
     private final Model model;
     private final Map<String, Tool> tools;
     private final int maxSteps;
@@ -31,6 +31,7 @@ public final class LoopRunner implements Runner {
         this.contextWindow = contextWindow == null ? new ContextWindow() : contextWindow;
     }
 
+    @Override
     public LoopCheckpoint start(List<Message> history, String input) {
         Objects.requireNonNull(history, "history");
         List<Message> messages = new ArrayList<>(history);
@@ -39,12 +40,14 @@ public final class LoopRunner implements Runner {
     }
 
     /** Advances until completion or until an external function result is required. */
+    @Override
     public LoopProgress advance(CancellationToken cancellation, Session session,
                                 LoopCheckpoint checkpoint, EventEmitter emit) throws Exception {
         return advanceInternal(cancellation, session, checkpoint, emit, false);
     }
 
     /** Applies a supplied result and returns a checkpoint that can be passed to advance. */
+    @Override
     public LoopCheckpoint resumeExternal(LoopCheckpoint checkpoint, ToolResult result, EventEmitter emit) {
         Objects.requireNonNull(checkpoint, "checkpoint");
         Objects.requireNonNull(result, "result");

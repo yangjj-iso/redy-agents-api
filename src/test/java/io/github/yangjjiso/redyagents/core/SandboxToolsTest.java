@@ -1,5 +1,6 @@
 package io.github.yangjjiso.redyagents.core;
 
+import io.github.yangjjiso.redyagents.cube.SandboxTools;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -8,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -34,7 +36,7 @@ class SandboxToolsTest {
     }
 
     @Test
-    void nonzeroExitBecomesToolFailureWithStderrAndRepeatedCallIsBlocked() throws Exception {
+    void nonzeroExitIsACommandResultAndCanBeRepeated() throws Exception {
         RecordingBackend backend = new RecordingBackend();
         backend.commandOutput = new SandboxToolBackend.CommandOutput(127, "", "not found");
         AtomicInteger decisions = new AtomicInteger();
@@ -42,12 +44,17 @@ class SandboxToolsTest {
                 ? Decision.toolCall("run", new ToolCall("sandbox.shell",
                         bytes("{\"command\":\"missing\"}"), "call_" + decisions.get()))
                 : Decision.finalMessage(messages.get(messages.size() - 1).content());
+        List<String> events = new ArrayList<>();
 
         String answer = new LoopRunner(model, SandboxTools.create(backend), 4)
-                .run(new CancellationToken(), session("active"), List.of(), "run", (type, data) -> {});
+                .run(new CancellationToken(), session("active"), List.of(), "run",
+                        (type, data) -> events.add(type));
 
-        assertEquals(1, backend.runs);
-        assertTrue(answer.contains("is blocked"));
+        assertEquals(2, backend.runs);
+        assertTrue(answer.contains("\"exit_code\":127"));
+        assertTrue(answer.contains("not found"));
+        assertEquals(2, events.stream().filter("tool.call.completed"::equals).count());
+        assertTrue(events.stream().noneMatch("tool.call.failed"::equals));
     }
 
     @Test

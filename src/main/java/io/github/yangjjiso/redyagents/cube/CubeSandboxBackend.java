@@ -1,14 +1,11 @@
-package io.github.yangjjiso.redyagents;
+package io.github.yangjjiso.redyagents.cube;
 
 import io.github.yangjjiso.redyagents.core.SandboxProvisioner;
 import io.github.yangjjiso.redyagents.core.SandboxToolBackend;
-import io.github.yangjjiso.redyagents.cube.CommandResult;
-import io.github.yangjjiso.redyagents.cube.CubeSandboxClient;
-import io.github.yangjjiso.redyagents.cube.CubeSandboxException;
 import java.time.Duration;
 import java.util.Objects;
 
-/** Bridges the CubeSandbox control and envd APIs to session lifecycle and local tools. */
+/** Adapts CubeSandbox control and envd APIs to the harness's lifecycle and tool ports. */
 public final class CubeSandboxBackend implements SandboxProvisioner, SandboxToolBackend {
     private final CubeSandboxClient client;
 
