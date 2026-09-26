@@ -39,6 +39,12 @@ Before every model call, `LoopRunner` fits the model's input into that budget. I
 
 The bundled estimator uses UTF-8 byte counts plus message overhead, not the model's exact token count. `max_output_tokens` is currently a prompt reserve; the demo model does not enforce a generation limit. The bundled extractive summary is a demo fallback, not the model- or server-generated semantic compaction used by Codex. A provider integration can inject its own tokenizer and compressor.
 
+## Tool failures and replay
+
+A tool can throw `ToolFailure` for a recoverable problem. The runner reports it to the model as a tool message so the model can correct its arguments or choose another action. An ordinary, unclassified exception fails the turn. A failed call with the same tool name and arguments cannot repeat indefinitely: one re-execution is allowed only when the tool declares itself idempotent and the failure is marked `retryable`. Blocked repeats also become tool feedback without executing again; the run's step limit bounds continued repeats.
+
+When a model repeats a `callId`, the runner replays that call's result or error within the current turn without executing the tool again. This replay state is not durable across turns or process restarts. A tool can implement `validateArguments` and `validateResult` to reject domain-invalid inputs or results; without those checks, the runner cannot tell whether a technically successful result string is correct for the task. The default server registers no tools, and the `demo` model does not request any. Side-effecting tools need their own durable idempotency records to prevent duplicate effects after a crash.
+
 The full HTTP contract is in [`api/openapi.yaml`](api/openapi.yaml).
 
 ## Code layout

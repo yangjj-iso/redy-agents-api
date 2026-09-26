@@ -1,8 +1,11 @@
 package io.github.yangjjiso.redyagents.core;
 
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 
 public final class LoopRunner implements Runner {
     private final Model model;
@@ -39,6 +42,8 @@ public final class LoopRunner implements Runner {
         }
         List<Message> messages = new ArrayList<>(history);
         messages.add(new Message("user", input));
+        Map<String, CachedCall> callsById = new HashMap<>();
+        Map<CallSignature, FailureState> failedSignatures = new HashMap<>();
         for (int step = 0; step < maxSteps; step++) {
             cancellation.throwIfCancelled();
             AgentConfig agent = session.agent();
@@ -67,26 +72,100 @@ public final class LoopRunner implements Runner {
                 if (call == null || call.name() == null || call.name().isEmpty()) {
                     throw new IllegalStateException("model returned an invalid tool call");
                 }
+                CallSignature signature = new CallSignature(call.name(),
+                        Base64.getEncoder().encodeToString(call.arguments()));
+                if (call.callId() != null) {
+                    CachedCall cached = callsById.get(call.callId());
+                    if (cached != null) {
+                        if (!cached.signature().equals(signature)) {
+                            String error = "tool call ID \"" + call.callId()
+                                    + "\" was reused with different tool or arguments";
+                            emit.emit("tool.call.failed", Map.of("name", call.name(), "error", error));
+                            throw new IllegalStateException(error);
+                        }
+                        cancellation.throwIfCancelled();
+                        emit.emit("tool.call.replayed", Map.of(
+                                "name", call.name(), "call_id", call.callId(),
+                                "outcome", cached.failure() == null ? "completed" : "failed"));
+                        appendToolExchange(messages, decision, call, cached.toolMessage());
+                        continue;
+                    }
+                }
                 Tool tool = tools.get(call.name());
                 if (tool == null) {
                     throw new IllegalStateException("unknown tool \"" + call.name() + "\"");
                 }
+                FailureState previousFailure = failedSignatures.get(signature);
+                if (previousFailure != null) {
+                    if (!tool.isIdempotent() || !previousFailure.failure().retryable()
+                            || previousFailure.retryUsed()) {
+                        String error = "repeated failed tool call \"" + call.name()
+                                + "\" with identical arguments is blocked; only one model-requested retry"
+                                + " is allowed for a retryable failure of an idempotent tool";
+                        emit.emit("tool.call.failed", Map.of("name", call.name(), "error", error));
+                        String feedback = "Tool failure: " + error;
+                        if (call.callId() != null) {
+                            callsById.put(call.callId(), new CachedCall(signature, feedback,
+                                    previousFailure.failure()));
+                        }
+                        appendToolExchange(messages, decision, call, feedback);
+                        continue;
+                    }
+                    // Permit one model-requested retry. Never retry a tool automatically.
+                    failedSignatures.put(signature, new FailureState(previousFailure.failure(), true));
+                }
+                cancellation.throwIfCancelled();
                 emit.emit("tool.call.started", Map.of("name", call.name()));
                 String result;
                 try {
-                    result = tool.execute(cancellation, call.arguments());
+                    tool.validateArguments(call.arguments());
+                    cancellation.throwIfCancelled();
+                    String rawResult = tool.execute(cancellation, call.arguments());
+                    cancellation.throwIfCancelled();
+                    result = rawResult == null ? "" : rawResult;
+                    tool.validateResult(call.arguments(), result);
+                    cancellation.throwIfCancelled();
+                } catch (ToolFailure failure) {
+                    cancellation.throwIfCancelled();
+                    failedSignatures.put(signature,
+                            new FailureState(failure, previousFailure != null));
+                    String feedback = "Tool failure: " + failure.getMessage()
+                            + " (retryable: " + failure.retryable() + ")";
+                    emit.emit("tool.call.failed", Map.of(
+                            "name", call.name(), "error", failure.getMessage(),
+                            "retryable", failure.retryable()));
+                    if (call.callId() != null) {
+                        callsById.put(call.callId(), new CachedCall(signature, feedback, failure));
+                    }
+                    appendToolExchange(messages, decision, call, feedback);
+                    continue;
+                } catch (CancellationException e) {
+                    throw e;
                 } catch (Exception e) {
                     emit.emit("tool.call.failed", Map.of("name", call.name(), "error", e.getMessage() == null ? "" : e.getMessage()));
                     throw e;
                 }
-                cancellation.throwIfCancelled();
                 emit.emit("tool.call.completed", Map.of("name", call.name()));
-                messages.add(new Message("assistant", decision.message() == null ? "" : decision.message()));
-                messages.add(new Message("tool", result == null ? "" : result, call.name()));
+                if (call.callId() != null) {
+                    callsById.put(call.callId(), new CachedCall(signature, result, null));
+                }
+                appendToolExchange(messages, decision, call, result);
                 continue;
             }
             throw new IllegalStateException("unknown model decision \"" + decision.kind() + "\"");
         }
         throw new IllegalStateException("run exceeded max steps");
     }
+
+    private static void appendToolExchange(List<Message> messages, Decision decision,
+                                           ToolCall call, String toolMessage) {
+        messages.add(new Message("assistant", decision.message() == null ? "" : decision.message()));
+        messages.add(new Message("tool", toolMessage, call.name()));
+    }
+
+    private record CallSignature(String name, String argumentsBase64) {}
+
+    private record CachedCall(CallSignature signature, String toolMessage, ToolFailure failure) {}
+
+    private record FailureState(ToolFailure failure, boolean retryUsed) {}
 }
