@@ -68,7 +68,7 @@ paths:
                   minLength: 1
       responses:
         '202':
-          description: Turn started
+          description: Turn started. If the latest input exceeds the prompt budget, the asynchronous turn later fails.
           content:
             application/json:
               schema:
@@ -192,6 +192,7 @@ components:
     AgentConfig:
       type: object
       required: [name, model]
+      description: The prompt budget is context_window_tokens minus max_output_tokens minus a fixed 128-token reserve. The effective defaults are returned with the session.
       properties:
         name:
           type: string
@@ -200,6 +201,16 @@ components:
           description: Only demo is supported by the bundled model adapter.
         instructions:
           type: string
+        context_window_tokens:
+          type: integer
+          minimum: 130
+          default: 4096
+          description: Total context window. Must exceed max_output_tokens by more than 128 tokens.
+        max_output_tokens:
+          type: integer
+          minimum: 1
+          default: 512
+          description: Output allocation reserved before fitting the prompt. The bundled demo model does not enforce a generation limit.
     Session:
       type: object
       required: [id, agent, status, created_at, updated_at]
@@ -250,6 +261,7 @@ components:
           type: integer
         type:
           type: string
+          description: Includes turn lifecycle events, message.delta, tool events, and context.compacted. The latter is emitted only when the model-input view is actually summarized or trimmed.
         session_id:
           type: string
         turn_id:
@@ -259,6 +271,7 @@ components:
           format: date-time
         data:
           type: object
+          description: For context.compacted, includes step, estimated_prompt_tokens, prompt_budget_tokens, and omitted_messages. Estimates use UTF-8 byte counts plus overhead, not an exact model tokenizer. The compacted context is retained in the in-memory session for later turns; original completed turns remain available as records.
           additionalProperties: true
     ErrorResponse:
       type: object

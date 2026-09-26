@@ -38,7 +38,9 @@ public final class AgentService implements AutoCloseable {
     }
 
     public Session createSession(AgentConfig agent) {
-        if (agent == null || blank(agent.name()) || blank(agent.model())) {
+        if (agent == null || blank(agent.name()) || blank(agent.model())
+                || agent.contextWindowTokens() <= AgentConfig.PROMPT_SAFETY_MARGIN_TOKENS
+                || agent.maxOutputTokens() <= 0 || agent.promptBudgetTokens() <= 0) {
             throw invalid();
         }
         Instant now = Instant.now();
@@ -61,7 +63,7 @@ public final class AgentService implements AutoCloseable {
             throw invalid();
         }
         Session runnerSession;
-        List<Message> history = new ArrayList<>();
+        List<Message> history;
         CancellationToken cancellation = new CancellationToken();
         Turn turn;
         synchronized (lock) {
@@ -78,21 +80,13 @@ public final class AgentService implements AutoCloseable {
                     turn.id(), state.session.createdAt(), now);
             appendEvent(state, "turn.started", turn.id(), null);
             runnerSession = state.session;
-            for (Turn previous : state.turns.values()) {
-                if (previous.id().equals(turn.id())) {
-                    break;
-                }
-                if ("completed".equals(previous.status())) {
-                    history.add(new Message("user", previous.input()));
-                    history.add(new Message("assistant", previous.output()));
-                }
-            }
+            history = state.context;
         }
         List<Message> completedHistory = List.copyOf(history);
         try {
             turnExecutor.execute(() -> runTurn(cancellation, runnerSession, completedHistory, turn));
         } catch (RuntimeException rejected) {
-            finishTurn(turn, cancellation, "failed", "", "worker unavailable");
+            finishTurn(turn, cancellation, "failed", "", "worker unavailable", null);
             throw rejected;
         }
         return turn;
@@ -175,16 +169,16 @@ public final class AgentService implements AutoCloseable {
         cancellation.attachWorker();
         try {
             cancellation.throwIfCancelled();
-            String output = runner.run(cancellation, session, history, turn.input(),
+            RunResult result = runner.runWithContext(cancellation, session, history, turn.input(),
                     (type, data) -> emitTurnEvent(turn, type, data));
-            finishTurn(turn, cancellation, "completed", output == null ? "" : output, "");
+            finishTurn(turn, cancellation, "completed", result.output(), "", result.context());
         } catch (Throwable failure) {
             if (cancellation.isCancelled() || failure instanceof CancellationException) {
-                finishTurn(turn, cancellation, "cancelled", "", "");
+                finishTurn(turn, cancellation, "cancelled", "", "", null);
             } else {
                 String message = failure.getMessage();
                 finishTurn(turn, cancellation, "failed", "",
-                        message == null || message.isEmpty() ? failure.getClass().getSimpleName() : message);
+                        message == null || message.isEmpty() ? failure.getClass().getSimpleName() : message, null);
             }
         } finally {
             cancellation.detachWorker();
@@ -204,7 +198,8 @@ public final class AgentService implements AutoCloseable {
         }
     }
 
-    private void finishTurn(Turn turn, CancellationToken cancellation, String status, String output, String error) {
+    private void finishTurn(Turn turn, CancellationToken cancellation, String status, String output,
+                            String error, List<Message> context) {
         synchronized (lock) {
             SessionState state = sessions.get(turn.sessionId());
             if (state == null) {
@@ -222,6 +217,9 @@ public final class AgentService implements AutoCloseable {
             Instant now = Instant.now();
             state.turns.put(turn.id(), new Turn(current.id(), current.sessionId(), current.input(),
                     status, output, error, current.createdAt(), now));
+            if ("completed".equals(status) && context != null) {
+                state.context = List.copyOf(context);
+            }
             state.session = new Session(state.session.id(), state.session.agent(), "idle", null,
                     state.session.createdAt(), now);
             state.cancellation = null;
@@ -313,6 +311,7 @@ public final class AgentService implements AutoCloseable {
     private static final class SessionState {
         private Session session;
         private final Map<String, Turn> turns = new LinkedHashMap<>();
+        private List<Message> context = List.of();
         private final List<Event> events = new ArrayList<>();
         private final Set<Subscription> subscriptions = new HashSet<>();
         private CancellationToken cancellation;

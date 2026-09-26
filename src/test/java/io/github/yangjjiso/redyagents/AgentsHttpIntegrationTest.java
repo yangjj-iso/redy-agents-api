@@ -39,6 +39,8 @@ class AgentsHttpIntegrationTest {
         assertTrue(sessionId.startsWith("sess_"));
         assertEquals("idle", session.path("status").asText());
         assertFalse(session.has("active_turn_id"));
+        assertEquals(4096, session.path("agent").path("context_window_tokens").asInt());
+        assertEquals(512, session.path("agent").path("max_output_tokens").asInt());
 
         String turnsPath = "/v1/agents/sessions/" + sessionId + "/turns";
         HttpResponse<String> started = post(turnsPath, "{\"input\":\"hello\"}", "application/json");
@@ -94,6 +96,12 @@ class AgentsHttpIntegrationTest {
                 "{\"agent\":{\"name\":\"x\",\"model\":\"demo\"}} true", "application/json").statusCode());
         assertEquals(400, post("/v1/agents/sessions",
                 "{\"agent\":{\"name\":\"  \",\"model\":\"demo\"}}", "application/json").statusCode());
+        assertEquals(400, post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"x\",\"model\":\"demo\",\"context_window_tokens\":256,\"max_output_tokens\":128}}",
+                "application/json").statusCode());
+        assertEquals(400, post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"x\",\"model\":\"demo\",\"max_output_tokens\":0}}",
+                "application/json").statusCode());
         assertEquals(404, get("/v1/agents/sessions/sess_missing").statusCode());
 
         HttpResponse<String> created = post("/v1/agents/sessions",
@@ -115,6 +123,24 @@ class AgentsHttpIntegrationTest {
         HttpResponse<String> emptyReplay = get("/v1/agents/sessions/" + sessionId + "/events?after=999");
         assertEquals(200, emptyReplay.statusCode());
         assertEquals(0, json.readTree(emptyReplay.body()).path("events").size());
+    }
+
+    @Test
+    @Timeout(10)
+    void oversizedLatestInputFailsWithinTheConfiguredPromptBudget() throws Exception {
+        HttpResponse<String> created = post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"limited\",\"model\":\"demo\",\"context_window_tokens\":256,\"max_output_tokens\":64}}",
+                "application/json");
+        assertEquals(201, created.statusCode(), created.body());
+        String sessionId = json.readTree(created.body()).path("id").asText();
+        HttpResponse<String> started = post("/v1/agents/sessions/" + sessionId + "/turns",
+                "{\"input\":\"" + "x".repeat(120) + "\"}", "application/json");
+        assertEquals(202, started.statusCode(), started.body());
+        String turnId = json.readTree(started.body()).path("id").asText();
+
+        JsonNode failed = awaitTerminalTurn(sessionId, turnId);
+        assertEquals("failed", failed.path("status").asText());
+        assertTrue(failed.path("error").asText().contains("latest user input"));
     }
 
     private JsonNode awaitTerminalTurn(String sessionId, String turnId) throws Exception {

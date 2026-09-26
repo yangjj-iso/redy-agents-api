@@ -8,20 +8,32 @@ public final class LoopRunner implements Runner {
     private final Model model;
     private final Map<String, Tool> tools;
     private final int maxSteps;
+    private final ContextWindow contextWindow;
 
     public LoopRunner(Model model) {
         this(model, Map.of(), 8);
     }
 
     public LoopRunner(Model model, Map<String, Tool> tools, int maxSteps) {
+        this(model, tools, maxSteps, new ContextWindow());
+    }
+
+    public LoopRunner(Model model, Map<String, Tool> tools, int maxSteps, ContextWindow contextWindow) {
         this.model = model;
         this.tools = tools == null ? Map.of() : Map.copyOf(tools);
         this.maxSteps = maxSteps > 0 ? maxSteps : 8;
+        this.contextWindow = contextWindow == null ? new ContextWindow() : contextWindow;
     }
 
     @Override
     public String run(CancellationToken cancellation, Session session, List<Message> history,
                       String input, EventEmitter emit) throws Exception {
+        return runWithContext(cancellation, session, history, input, emit).output();
+    }
+
+    @Override
+    public RunResult runWithContext(CancellationToken cancellation, Session session, List<Message> history,
+                                    String input, EventEmitter emit) throws Exception {
         if (model == null) {
             throw new IllegalStateException("model adapter is not configured");
         }
@@ -29,14 +41,26 @@ public final class LoopRunner implements Runner {
         messages.add(new Message("user", input));
         for (int step = 0; step < maxSteps; step++) {
             cancellation.throwIfCancelled();
-            Decision decision = model.next(cancellation, session.agent(), List.copyOf(messages));
+            AgentConfig agent = session.agent();
+            ContextWindow.Result context = contextWindow.fit(
+                    List.copyOf(messages), agent.instructions(), agent.promptBudgetTokens());
+            if (context.compacted()) {
+                emit.emit("context.compacted", Map.of(
+                        "step", step + 1,
+                        "estimated_prompt_tokens", context.estimatedTokens(),
+                        "prompt_budget_tokens", agent.promptBudgetTokens(),
+                        "omitted_messages", context.omittedMessages()));
+            }
+            messages = new ArrayList<>(context.messages());
+            Decision decision = model.next(cancellation, agent, List.copyOf(messages));
             if (decision == null) {
                 throw new IllegalStateException("model returned no decision");
             }
             if ("final".equals(decision.kind())) {
                 String response = decision.message() == null ? "" : decision.message();
                 emit.emit("message.delta", Map.of("text", response));
-                return response;
+                messages.add(new Message("assistant", response));
+                return new RunResult(response, messages);
             }
             if ("tool_call".equals(decision.kind())) {
                 ToolCall call = decision.tool();
