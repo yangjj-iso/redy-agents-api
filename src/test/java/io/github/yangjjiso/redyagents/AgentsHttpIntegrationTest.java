@@ -11,17 +11,29 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {"server.address=127.0.0.1", "redy.sse.heartbeat-seconds=1"})
 class AgentsHttpIntegrationTest {
+    @TempDir
+    static Path dataDir;
+
+    @DynamicPropertySource
+    static void configureDataDir(DynamicPropertyRegistry registry) {
+        registry.add("redy.data-dir", () -> dataDir.toString());
+    }
+
     private final HttpClient client = HttpClient.newHttpClient();
     private final ObjectMapper json = new ObjectMapper();
 
@@ -61,11 +73,32 @@ class AgentsHttpIntegrationTest {
         HttpResponse<String> replay = get(eventsPath + "?after=1");
         assertEquals(200, replay.statusCode(), replay.body());
         JsonNode events = json.readTree(replay.body()).path("events");
-        assertEquals(2, events.size(), replay.body());
+        assertTrue(events.size() >= 2, replay.body());
         assertEquals(2, events.get(0).path("sequence").asInt());
-        assertEquals("message.delta", events.get(0).path("type").asText());
-        assertEquals(3, events.get(1).path("sequence").asInt());
-        assertEquals("turn.completed", events.get(1).path("type").asText());
+        assertTrue(containsType(events, "message.delta"), replay.body());
+        assertTrue(containsType(events, "turn.completed"), replay.body());
+        JsonNode outputDone = eventOfType(events, "agent.session.turn.output_text.done");
+        assertTrue(outputDone != null, replay.body());
+        assertTrue(outputDone.path("event_id").asText().startsWith("evt_"), replay.body());
+        assertEquals("Demo response: hello", outputDone.path("text").asText());
+        assertEquals(0, outputDone.path("output_index").asInt());
+        assertEquals(0, outputDone.path("content_index").asInt());
+        String outputItemId = outputDone.path("item_id").asText();
+        assertTrue(outputItemId.startsWith("item_"), replay.body());
+        JsonNode outputDelta = eventOfType(events, "agent.session.turn.output_text.delta");
+        assertTrue(outputDelta != null, replay.body());
+        assertEquals(outputItemId, outputDelta.path("item_id").asText());
+        assertEquals("Demo response: hello", outputDelta.path("delta").asText());
+        JsonNode outputItem = eventOfType(events, "agent.session.turn.item.done");
+        assertTrue(outputItem != null, replay.body());
+        assertEquals(outputItemId, outputItem.path("item").path("id").asText());
+        JsonNode turnCompleted = eventOfType(events, "agent.session.turn.completed");
+        assertTrue(turnCompleted != null, replay.body());
+        assertEquals(turnId, turnCompleted.path("turn").path("id").asText());
+        assertEquals("completed", turnCompleted.path("turn").path("status").asText());
+        JsonNode sessionIdle = eventOfType(events, "agent.session.idle");
+        assertTrue(sessionIdle != null, replay.body());
+        assertEquals("idle", sessionIdle.path("session").path("status").asText());
 
         HttpRequest sseRequest = HttpRequest.newBuilder(uri(eventsPath + "?after=1"))
                 .header("Accept", "text/event-stream")
@@ -78,7 +111,7 @@ class AgentsHttpIntegrationTest {
         try (var body = stream.body();
              var lines = new BufferedReader(new InputStreamReader(body, StandardCharsets.UTF_8))) {
             assertEquals("2", lines.readLine().substring(3).trim());
-            assertEquals("message.delta", lines.readLine().substring(6).trim());
+            assertEquals(events.get(0).path("type").asText(), lines.readLine().substring(6).trim());
             assertTrue(lines.readLine().startsWith("data:"));
             assertEquals("", lines.readLine());
             assertEquals("3", lines.readLine().substring(3).trim());
@@ -141,6 +174,101 @@ class AgentsHttpIntegrationTest {
         JsonNode failed = awaitTerminalTurn(sessionId, turnId);
         assertEquals("failed", failed.path("status").asText());
         assertTrue(failed.path("error").asText().contains("latest user input"));
+    }
+
+    @Test
+    @Timeout(10)
+    void initialInputAndSessionEventsProduceSavedTurnsAndItems() throws Exception {
+        HttpResponse<String> created = post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"events-demo\",\"model\":\"demo\"},\"input\":\"first\"}",
+                "application/json");
+        assertEquals(201, created.statusCode(), created.body());
+        String sessionId = json.readTree(created.body()).path("id").asText();
+        String base = "/v1/agents/sessions/" + sessionId;
+
+        JsonNode firstTurn = awaitTurnInList(sessionId, 1);
+        assertEquals("completed", awaitTerminalTurn(sessionId, firstTurn.path("id").asText())
+                .path("status").asText());
+
+        HttpResponse<String> submitted = post(base + "/events",
+                "{\"events\":[{\"type\":\"agent.session.input.message\",\"input\":[{\"role\":\"user\","
+                        + "\"content\":[{\"type\":\"input_text\",\"text\":\"second\"}]}]}]}",
+                "application/json");
+        assertEquals(202, submitted.statusCode(), submitted.body());
+        assertTrue(submitted.body().isEmpty());
+        assertEquals(sessionId, json.readTree(get(base).body()).path("id").asText());
+
+        JsonNode secondTurn = awaitTurnInList(sessionId, 2);
+        JsonNode completed = awaitTerminalTurn(sessionId, secondTurn.path("id").asText());
+        assertEquals("Demo response: second", completed.path("output").asText());
+
+        HttpResponse<String> itemsResponse = get(base + "/items");
+        assertEquals(200, itemsResponse.statusCode(), itemsResponse.body());
+        JsonNode itemsPage = json.readTree(itemsResponse.body());
+        assertTrue(itemsPage.path("data").size() >= 4, itemsResponse.body());
+        assertFalse(itemsPage.path("has_more").asBoolean());
+        assertFalse(itemsPage.path("first_id").asText().isBlank());
+    }
+
+    @Test
+    @Timeout(10)
+    void sessionEventInputRejectsInvalidShapesAndUnmatchedToolResults() throws Exception {
+        String base = "/v1/agents/sessions";
+        assertEquals(400, post(base,
+                "{\"agent\":{\"name\":\"x\",\"model\":\"demo\"},\"input\":\" \"}",
+                "application/json").statusCode());
+        String sessionId = json.readTree(post(base,
+                "{\"agent\":{\"name\":\"events-invalid\",\"model\":\"demo\"}}",
+                "application/json").body()).path("id").asText();
+        String eventsPath = base + "/" + sessionId + "/events";
+        assertEquals(400, post(eventsPath, "{\"events\":[]}", "application/json").statusCode());
+        assertEquals(400, post(eventsPath,
+                "{\"events\":[{\"type\":\"agent.session.input.message\",\"input\":[]}]}",
+                "application/json").statusCode());
+        assertEquals(400, post(eventsPath,
+                "{\"events\":[{\"type\":\"agent.session.input.tool_result\",\"success\":true,\"output\":\"ok\"}]}",
+                "application/json").statusCode());
+        assertEquals(400, post(eventsPath,
+                "{\"events\":[{\"type\":\"agent.session.input.tool_result\",\"turn_id\":\"turn_missing\","
+                        + "\"call_id\":\"call_missing\",\"success\":false}]}",
+                "application/json").statusCode());
+        assertEquals(409, post(eventsPath,
+                "{\"events\":[{\"type\":\"agent.session.input.tool_result\",\"turn_id\":\"turn_missing\","
+                        + "\"call_id\":\"call_missing\",\"success\":true,\"output\":\"ok\"}]}",
+                "application/json").statusCode());
+        assertEquals(409, post(eventsPath,
+                "{\"events\":[{\"type\":\"agent.session.input.cancel\"}]}",
+                "application/json").statusCode());
+        assertEquals(404, get(base + "/sess_missing/items").statusCode());
+        assertEquals(404, get(base + "/sess_missing/turns").statusCode());
+    }
+
+    private JsonNode awaitTurnInList(String sessionId, int count) throws Exception {
+        String path = "/v1/agents/sessions/" + sessionId + "/turns";
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            HttpResponse<String> response = get(path);
+            assertEquals(200, response.statusCode(), response.body());
+            JsonNode data = json.readTree(response.body()).path("data");
+            if (data.size() >= count) {
+                return data.get(count - 1);
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("Expected turn missing from saved turn list");
+    }
+
+    private static boolean containsType(JsonNode events, String expected) {
+        return eventOfType(events, expected) != null;
+    }
+
+    private static JsonNode eventOfType(JsonNode events, String expected) {
+        for (JsonNode event : events) {
+            if (expected.equals(event.path("type").asText())) {
+                return event;
+            }
+        }
+        return null;
     }
 
     private JsonNode awaitTerminalTurn(String sessionId, String turnId) throws Exception {

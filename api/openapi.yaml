@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Redy Agents API
-  version: 0.2.0
-  description: Java service with an in-memory session store and demo model.
+  version: 0.3.0
+  description: Java demo-model service with an Agents API-style session and function-event subset.
 servers:
   - url: http://127.0.0.1:8080
 paths:
@@ -25,6 +25,10 @@ paths:
               properties:
                 agent:
                   $ref: '#/components/schemas/AgentConfig'
+                input:
+                  type: string
+                  minLength: 1
+                  description: Optional initial user message. This implementation supports the string shorthand only.
       responses:
         '201':
           description: Session created
@@ -53,6 +57,17 @@ paths:
   /v1/agents/sessions/{sessionID}/turns:
     parameters:
       - $ref: '#/components/parameters/sessionID'
+    get:
+      operationId: listTurns
+      responses:
+        '200':
+          description: All turns for this session in creation order. Pagination is not yet supported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnPage'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       operationId: startTurn
       requestBody:
@@ -68,7 +83,7 @@ paths:
                   minLength: 1
       responses:
         '202':
-          description: Turn started. If the latest input exceeds the prompt budget, the asynchronous turn later fails.
+          description: Turn accepted. If the latest input exceeds the prompt budget, the asynchronous turn later fails.
           content:
             application/json:
               schema:
@@ -116,19 +131,20 @@ paths:
   /v1/agents/sessions/{sessionID}/events:
     parameters:
       - $ref: '#/components/parameters/sessionID'
-      - name: after
-        in: query
-        description: Return events with a sequence greater than this cursor.
-        schema:
-          type: integer
-          minimum: 0
-      - name: Last-Event-ID
-        in: header
-        description: SSE reconnect cursor, used when after is omitted.
-        schema:
-          type: string
     get:
       operationId: getEvents
+      parameters:
+        - name: after
+          in: query
+          description: Return events with a sequence greater than this cursor.
+          schema:
+            type: integer
+            minimum: 0
+        - name: Last-Event-ID
+          in: header
+          description: SSE reconnect cursor, used when after is omitted.
+          schema:
+            type: string
       responses:
         '200':
           description: JSON snapshot or SSE stream, selected by Accept header.
@@ -147,6 +163,50 @@ paths:
                 type: string
         '400':
           $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: submitEvents
+      description: Submit user input, a function result, or cancellation. This subset accepts one user text part per message event. Multiple events are validated first, then applied in array order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  minItems: 1
+                  items:
+                    oneOf:
+                      - $ref: '#/components/schemas/InputMessageEvent'
+                      - $ref: '#/components/schemas/InputToolResultEvent'
+                      - $ref: '#/components/schemas/InputCancelEvent'
+      responses:
+        '202':
+          description: Events accepted; inspect the session and turn for outcomes.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+  /v1/agents/sessions/{sessionID}/items:
+    parameters:
+      - $ref: '#/components/parameters/sessionID'
+    get:
+      operationId: listItems
+      responses:
+        '200':
+          description: All saved root-agent items for this session in creation order. Pagination is not yet supported.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ItemPage'
         '404':
           $ref: '#/components/responses/NotFound'
 components:
@@ -177,7 +237,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     Conflict:
-      description: Session already has an active turn, or turn cannot be cancelled
+      description: Input conflicts with the current session or turn state
       content:
         application/json:
           schema:
@@ -221,9 +281,13 @@ components:
           $ref: '#/components/schemas/AgentConfig'
         status:
           type: string
-          enum: [idle, running]
+          enum: [idle, in_progress, requires_action, failed]
         active_turn_id:
           type: string
+        required_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RequiredAction'
         created_at:
           type: string
           format: date-time
@@ -242,7 +306,8 @@ components:
           type: string
         status:
           type: string
-          enum: [running, cancelling, completed, failed, cancelled]
+          enum: [queued, in_progress, waiting, cancelling, completed, failed, cancelled]
+          description: cancelling is a temporary local extension while an in-progress worker stops.
         output:
           type: string
         error:
@@ -253,15 +318,140 @@ components:
         completed_at:
           type: string
           format: date-time
+    RequiredAction:
+      type: object
+      required: [type, turn_id, call_id, name, arguments]
+      properties:
+        type:
+          const: function_call
+        turn_id:
+          type: string
+        call_id:
+          type: string
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+    InputMessageEvent:
+      type: object
+      required: [type, input]
+      properties:
+        type:
+          const: agent.session.input.message
+        input:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                const: user
+              content:
+                type: array
+                minItems: 1
+                maxItems: 1
+                items:
+                  type: object
+                  required: [type, text]
+                  properties:
+                    type:
+                      const: input_text
+                    text:
+                      type: string
+                      minLength: 1
+    InputToolResultEvent:
+      type: object
+      required: [type, turn_id, call_id, success]
+      description: A successful result requires output as a string; a failed result requires error as a non-empty string.
+      properties:
+        type:
+          const: agent.session.input.tool_result
+        turn_id:
+          type: string
+          minLength: 1
+        call_id:
+          type: string
+          minLength: 1
+        success:
+          type: boolean
+        output:
+          type: string
+        error:
+          type: string
+    InputCancelEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          const: agent.session.input.cancel
+    ItemPage:
+      type: object
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionItem'
+        first_id:
+          type: [string, 'null']
+        last_id:
+          type: [string, 'null']
+        has_more:
+          const: false
+    TurnPage:
+      type: object
+      required: [data, has_more]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Turn'
+        first_id:
+          type: [string, 'null']
+        last_id:
+          type: [string, 'null']
+        has_more:
+          const: false
+    SessionItem:
+      type: object
+      required: [id, turn_id, type, created_at]
+      properties:
+        id:
+          type: string
+        turn_id:
+          type: string
+        type:
+          type: string
+        role:
+          type: string
+        content:
+          type: string
+        name:
+          type: string
+        call_id:
+          type: string
+        arguments_base64:
+          type: string
+        success:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
     Event:
       type: object
-      required: [sequence, type, session_id, created_at]
+      required: [event_id, sequence, type, session_id, created_at]
       properties:
+        event_id:
+          type: string
+          description: Stable ID formed from the session ID and per-session sequence.
         sequence:
           type: integer
         type:
           type: string
-          description: Includes turn lifecycle events, message.delta, tool events, and context.compacted. The latter is emitted only when the model-input view is actually summarized or trimmed.
+          description: Includes Agents API session/turn/item/output_text event names for the supported subset, plus the earlier turn.*, message.delta, tool.call.*, and context.compacted events.
         session_id:
           type: string
         turn_id:
@@ -269,9 +459,25 @@ components:
         created_at:
           type: string
           format: date-time
+        session:
+          $ref: '#/components/schemas/Session'
+        turn:
+          $ref: '#/components/schemas/Turn'
+        item:
+          $ref: '#/components/schemas/SessionItem'
+        item_id:
+          type: string
+        output_index:
+          type: integer
+        content_index:
+          type: integer
+        delta:
+          type: string
+        text:
+          type: string
         data:
           type: object
-          description: For context.compacted, includes step, estimated_prompt_tokens, prompt_budget_tokens, and omitted_messages. Estimates use UTF-8 byte counts plus overhead, not an exact model tokenizer. The compacted context is retained in the in-memory session for later turns; original completed turns remain available as records.
+          description: Backward-compatible payload envelope. Official event fields also appear at the top level. For context.compacted, this includes step, estimated_prompt_tokens, prompt_budget_tokens, and omitted_messages. Estimates use UTF-8 byte counts plus overhead, not an exact model tokenizer.
           additionalProperties: true
     ErrorResponse:
       type: object

@@ -14,4 +14,9 @@ public interface Tool {
     default boolean isIdempotent() {
         return false;
     }
+
+    /** External functions pause the loop until the application supplies a result. */
+    default boolean isExternal() {
+        return false;
+    }
 }

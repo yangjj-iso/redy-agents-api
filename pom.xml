@@ -11,9 +11,9 @@
     </parent>
     <groupId>io.github.yangjjiso</groupId>
     <artifactId>redy-agents-api</artifactId>
-    <version>0.2.0-SNAPSHOT</version>
+    <version>0.3.0-SNAPSHOT</version>
     <name>Redy Agents API</name>
-    <description>Java Agents API scaffold with asynchronous turns and replayable events</description>
+    <description>Java Agents API subset with durable sessions and a resumable harness</description>
     <properties>
         <java.version>17</java.version>
     </properties>

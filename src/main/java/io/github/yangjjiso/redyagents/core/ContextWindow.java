@@ -133,7 +133,7 @@ public final class ContextWindow {
                 }
                 long allowance = Math.max(0, textCost(message.content()) - (cost - budget));
                 String shortened = fitText(message.content(), allowance);
-                currentTurn.set(i, new Message(message.role(), shortened, message.tool()));
+                currentTurn.set(i, message.withContent(shortened));
                 cost = instructionCost + messagesCost(currentTurn);
             }
         }
@@ -182,7 +182,9 @@ public final class ContextWindow {
     }
 
     private long messageCost(Message message) {
-        return MESSAGE_OVERHEAD + textCost(message.role()) + textCost(message.tool()) + textCost(message.content());
+        return MESSAGE_OVERHEAD + textCost(message.role()) + textCost(message.tool())
+                + textCost(message.content()) + textCost(message.callId())
+                + textCost(message.argumentsBase64()) + (message.success() == null ? 0 : 1);
     }
 
     private long textCost(String text) {

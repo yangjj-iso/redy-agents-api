@@ -51,7 +51,8 @@ class AgentServiceContextTest {
         long deadline = System.nanoTime() + Duration.ofSeconds(3).toNanos();
         while (System.nanoTime() < deadline) {
             Turn turn = service.getTurn(sessionId, turnId);
-            if (!"running".equals(turn.status()) && !"cancelling".equals(turn.status())) {
+            if ("completed".equals(turn.status()) || "failed".equals(turn.status())
+                    || "cancelled".equals(turn.status())) {
                 return turn;
             }
             Thread.sleep(10);
