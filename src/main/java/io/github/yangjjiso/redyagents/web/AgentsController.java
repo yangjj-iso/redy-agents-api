@@ -5,6 +5,7 @@ import io.github.yangjjiso.redyagents.core.AgentConfig;
 import io.github.yangjjiso.redyagents.core.AgentException;
 import io.github.yangjjiso.redyagents.core.AgentService;
 import io.github.yangjjiso.redyagents.core.Session;
+import io.github.yangjjiso.redyagents.core.SessionEnvironment;
 import io.github.yangjjiso.redyagents.core.SessionItem;
 import io.github.yangjjiso.redyagents.core.Turn;
 import java.util.List;
@@ -33,7 +34,8 @@ public class AgentsController {
         this.streams = streams;
     }
 
-    public record CreateSessionRequest(AgentConfig agent, String input) {}
+    public record CreateSessionRequest(AgentConfig agent, String input,
+                                       SessionEnvironment environment) {}
 
     public record StartTurnRequest(String input) {}
 
@@ -54,12 +56,27 @@ public class AgentsController {
             throw AgentException.invalid();
         }
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(service.createSession(request.agent(), request.input()));
+                .body(service.createSession(request.agent(), request.input(), request.environment()));
     }
 
     @GetMapping("/{sessionID}")
     public Session getSession(@PathVariable String sessionID) {
         return service.getSession(sessionID);
+    }
+
+    @PostMapping("/{sessionID}/environment/pause")
+    public Session pauseEnvironment(@PathVariable String sessionID) {
+        return service.pauseEnvironment(sessionID);
+    }
+
+    @PostMapping("/{sessionID}/environment/resume")
+    public Session resumeEnvironment(@PathVariable String sessionID) {
+        return service.resumeEnvironment(sessionID);
+    }
+
+    @PostMapping("/{sessionID}/environment/kill")
+    public Session killEnvironment(@PathVariable String sessionID) {
+        return service.killEnvironment(sessionID);
     }
 
     @PostMapping(path = "/{sessionID}/turns", consumes = MediaType.APPLICATION_JSON_VALUE)

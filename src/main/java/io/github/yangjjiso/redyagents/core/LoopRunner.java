@@ -256,7 +256,8 @@ public final class LoopRunner implements Runner {
                 }
                 appendToolCall(messages, decision, call, emit, legacyMessages);
                 emit.emit("tool.call.started", eventData(call));
-                String rawResult = tool.execute(cancellation, call.arguments());
+                String rawResult = tool.execute(cancellation,
+                        new ToolExecutionContext(session, call.callId()), call.arguments());
                 cancellation.throwIfCancelled();
                 String result = rawResult == null ? "" : rawResult;
                 tool.validateResult(call.arguments(), result);

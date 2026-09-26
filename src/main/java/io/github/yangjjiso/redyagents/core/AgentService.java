@@ -27,6 +27,7 @@ public final class AgentService implements AutoCloseable {
     private final SecureRandom random = new SecureRandom();
     private final Runner runner;
     private final SessionStore store;
+    private final SandboxProvisioner sandboxProvisioner;
     private final ObjectMapper json = new ObjectMapper();
     private final ExecutorService turnExecutor = Executors.newCachedThreadPool(daemonThreads("redy-turn-"));
     private final ExecutorService eventExecutor = Executors.newCachedThreadPool(daemonThreads("redy-events-"));
@@ -41,11 +42,16 @@ public final class AgentService implements AutoCloseable {
     }
 
     public AgentService(Runner runner, SessionStore store) {
+        this(runner, store, null);
+    }
+
+    public AgentService(Runner runner, SessionStore store, SandboxProvisioner sandboxProvisioner) {
         if (runner == null) {
             throw new IllegalArgumentException("runner is required");
         }
         this.runner = runner;
         this.store = store;
+        this.sandboxProvisioner = sandboxProvisioner;
         restore();
     }
 
@@ -54,32 +60,173 @@ public final class AgentService implements AutoCloseable {
     }
 
     public Session createSession(AgentConfig agent, String initialInput) {
+        return createSession(agent, initialInput, null);
+    }
+
+    public Session createSession(AgentConfig agent, String initialInput,
+                                 SessionEnvironment requestedEnvironment) {
         if (agent == null || blank(agent.name()) || blank(agent.model())
                 || agent.contextWindowTokens() <= AgentConfig.PROMPT_SAFETY_MARGIN_TOKENS
                 || agent.maxOutputTokens() <= 0 || agent.promptBudgetTokens() <= 0) {
             throw invalid();
         }
-        Instant now = Instant.now();
-        Session session = new Session(newId("sess_"), agent, "idle", null, now, now);
-        synchronized (lock) {
-            requireOpen();
-            SessionState state = new SessionState(session);
-            sessions.put(session.id(), state);
-            state.events.add(newEvent(state, "agent.session.created", null,
-                    Map.of("session", state.session)));
-            try {
-                persist(state);
-            } catch (RuntimeException failure) {
-                sessions.remove(session.id());
-                throw failure;
+        if (initialInput != null && blank(initialInput)) {
+            throw invalid();
+        }
+        SessionEnvironment request = requestedEnvironment == null
+                ? SessionEnvironment.none() : requestedEnvironment;
+        if (("none".equals(request.type()) && (request.sandboxId() != null
+                || request.templateId() != null || request.status() != null))
+                || ("cube".equals(request.type()) && (request.sandboxId() != null
+                || request.status() != null))
+                || (!"none".equals(request.type()) && !"cube".equals(request.type()))) {
+            throw invalid();
+        }
+        SessionEnvironment environment;
+        if ("cube".equals(request.type())) {
+            if (sandboxProvisioner == null) {
+                throw AgentException.unavailable("CubeSandbox provider is not configured");
             }
-            lock.notifyAll();
+            String sandboxId;
+            try {
+                sandboxId = sandboxProvisioner.create(request.templateId());
+            } catch (RuntimeException failure) {
+                throw sandboxUnavailable("CubeSandbox creation failed", failure);
+            }
+            if (blank(sandboxId)) {
+                throw AgentException.unavailable("CubeSandbox provider returned an empty sandbox ID");
+            }
+            environment = new SessionEnvironment("cube", sandboxId, request.templateId());
+        } else {
+            environment = SessionEnvironment.none();
+        }
+        Instant now = Instant.now();
+        Session session = new Session(newId("sess_"), agent, "idle", null, now, now,
+                List.of(), environment);
+        try {
+            synchronized (lock) {
+                requireOpen();
+                SessionState state = new SessionState(session);
+                sessions.put(session.id(), state);
+                state.events.add(newEvent(state, "agent.session.created", null,
+                        Map.of("session", state.session)));
+                try {
+                    persist(state);
+                } catch (RuntimeException failure) {
+                    sessions.remove(session.id());
+                    throw failure;
+                }
+                lock.notifyAll();
+            }
+        } catch (RuntimeException failure) {
+            if ("cube".equals(environment.type())) {
+                try {
+                    sandboxProvisioner.kill(environment.sandboxId());
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
         }
         if (initialInput != null) {
             startTurn(session.id(), initialInput);
             return getSession(session.id());
         }
         return session;
+    }
+
+    public Session pauseEnvironment(String sessionId) {
+        return changeEnvironment(sessionId, "active", "pausing", "paused",
+                sandboxProvisioner == null ? null : sandboxProvisioner::pause);
+    }
+
+    public Session resumeEnvironment(String sessionId) {
+        return changeEnvironment(sessionId, "paused", "resuming", "active",
+                sandboxProvisioner == null ? null : sandboxProvisioner::resume);
+    }
+
+    public Session killEnvironment(String sessionId) {
+        return changeEnvironment(sessionId, null, "killing", "killed",
+                sandboxProvisioner == null ? null : sandboxProvisioner::kill);
+    }
+
+    private Session changeEnvironment(String sessionId, String expectedStatus,
+                                      String transitionStatus, String nextStatus,
+                                      Consumer<String> action) {
+        String sandboxId;
+        SessionState state;
+        synchronized (lock) {
+            requireOpen();
+            state = getState(sessionId);
+            SessionEnvironment environment = state.session.environment();
+            if ("cube".equals(environment.type()) && nextStatus.equals(environment.status())) {
+                return state.session;
+            }
+            if ("cube".equals(environment.type()) && sandboxProvisioner == null) {
+                throw AgentException.unavailable("CubeSandbox provider is not configured");
+            }
+            if (action == null || !"cube".equals(environment.type())
+                    || "killed".equals(environment.status())
+                    || (expectedStatus != null && !expectedStatus.equals(environment.status())
+                    && !transitionStatus.equals(environment.status()))
+                    || (expectedStatus == null && !transitionStatus.equals(environment.status())
+                    && !"active".equals(environment.status())
+                    && !"paused".equals(environment.status())
+                    && !"pausing".equals(environment.status())
+                    && !"resuming".equals(environment.status()))
+                    || state.session.activeTurnId() != null || state.environmentBusy) {
+                throw conflict();
+            }
+            state.environmentBusy = true;
+            sandboxId = environment.sandboxId();
+            if (!transitionStatus.equals(environment.status())) {
+                Session previous = state.session;
+                state.session = new Session(previous.id(), previous.agent(), previous.status(),
+                        previous.activeTurnId(), previous.createdAt(), Instant.now(),
+                        previous.requiredActions(), environment.withStatus(transitionStatus));
+                try {
+                    appendEvent(state, "agent.session.environment." + transitionStatus, null,
+                            Map.of("environment", state.session.environment()));
+                } catch (RuntimeException failure) {
+                    state.session = previous;
+                    state.environmentBusy = false;
+                    throw failure;
+                }
+            }
+        }
+        try {
+            action.accept(sandboxId);
+        } catch (RuntimeException failure) {
+            synchronized (lock) {
+                state.environmentBusy = false;
+                lock.notifyAll();
+            }
+            throw sandboxUnavailable("CubeSandbox environment action failed; retry the same action",
+                    failure);
+        } catch (Error failure) {
+            synchronized (lock) {
+                state.environmentBusy = false;
+                lock.notifyAll();
+            }
+            throw failure;
+        }
+        synchronized (lock) {
+            Session previous = state.session;
+            try {
+                state.session = new Session(previous.id(), previous.agent(), previous.status(),
+                        previous.activeTurnId(), previous.createdAt(), Instant.now(),
+                        previous.requiredActions(), previous.environment().withStatus(nextStatus));
+                appendEvent(state, "agent.session.environment." + nextStatus, null,
+                        Map.of("environment", state.session.environment()));
+                return state.session;
+            } catch (RuntimeException failure) {
+                state.session = previous;
+                throw failure;
+            } finally {
+                state.environmentBusy = false;
+                lock.notifyAll();
+            }
+        }
     }
 
     public Session getSession(String sessionId) {
@@ -100,7 +247,9 @@ public final class AgentService implements AutoCloseable {
         synchronized (lock) {
             requireOpen();
             SessionState state = getState(sessionId);
-            if (state.session.activeTurnId() != null) {
+            if (state.session.activeTurnId() != null || state.environmentBusy
+                    || ("cube".equals(state.session.environment().type())
+                    && !"active".equals(state.session.environment().status()))) {
                 throw conflict();
             }
             Instant now = Instant.now();
@@ -119,7 +268,7 @@ public final class AgentService implements AutoCloseable {
             state.turns.put(turn.id(), turn);
             state.cancellation = cancellation;
             state.session = new Session(state.session.id(), state.session.agent(), "in_progress",
-                    turn.id(), state.session.createdAt(), now);
+                    turn.id(), state.session.createdAt(), now, List.of(), state.session.environment());
             state.executionMessages = new ArrayList<>(state.context);
             Message user = new Message("user", input);
             state.executionMessages.add(user);
@@ -298,7 +447,7 @@ public final class AgentService implements AutoCloseable {
             state.turns.put(turnId, new Turn(turn.id(), turn.sessionId(), turn.input(),
                     "in_progress", turn.output(), turn.error(), turn.createdAt(), null));
             state.session = new Session(state.session.id(), state.session.agent(), "in_progress",
-                    turnId, state.session.createdAt(), now);
+                    turnId, state.session.createdAt(), now, List.of(), state.session.environment());
             state.cancellation = cancellation;
             state.events.add(newEvent(state, "agent.session.in_progress", turnId,
                     Map.of("session", state.session)));
@@ -411,7 +560,8 @@ public final class AgentService implements AutoCloseable {
             Session oldSession = state.session;
             state.turns.put(turnId, cancelling);
             state.session = new Session(state.session.id(), state.session.agent(), state.session.status(),
-                    state.session.activeTurnId(), state.session.createdAt(), Instant.now());
+                    state.session.activeTurnId(), state.session.createdAt(), Instant.now(),
+                    state.session.requiredActions(), state.session.environment());
             cancellation = state.cancellation;
             try {
                 appendEvent(state, "turn.cancelling", turnId, null);
@@ -549,7 +699,8 @@ public final class AgentService implements AutoCloseable {
             state.turns.put(turn.id(), new Turn(current.id(), current.sessionId(), current.input(),
                     "waiting", "", "", current.createdAt(), null));
             state.session = new Session(state.session.id(), state.session.agent(), "requires_action",
-                    turn.id(), state.session.createdAt(), now, List.of(action));
+                    turn.id(), state.session.createdAt(), now, List.of(action),
+                    state.session.environment());
             state.cancellation = null;
             try {
                 appendEvent(state, "agent.session.requires_action", turn.id(),
@@ -764,7 +915,7 @@ public final class AgentService implements AutoCloseable {
                         status, output, error, current.createdAt(), now);
                 state.turns.put(turn.id(), terminal);
                 state.session = new Session(state.session.id(), state.session.agent(), "idle", null,
-                        state.session.createdAt(), now);
+                        state.session.createdAt(), now, List.of(), state.session.environment());
                 state.cancellation = null;
                 state.checkpoint = null;
                 state.safeToResume = false;
@@ -1039,7 +1190,7 @@ public final class AgentService implements AutoCloseable {
                     outcome, "", error, turn.createdAt(), now);
             state.turns.put(activeId, terminal);
             state.session = new Session(state.session.id(), state.session.agent(), "idle", null,
-                    state.session.createdAt(), now);
+                    state.session.createdAt(), now, List.of(), state.session.environment());
             state.checkpoint = null;
             state.safeToResume = false;
             state.events.add(newEvent(state, "turn." + outcome, activeId,
@@ -1169,6 +1320,12 @@ public final class AgentService implements AutoCloseable {
         return new AgentException(AgentException.Reason.INVALID, "invalid request");
     }
 
+    private static AgentException sandboxUnavailable(String message, RuntimeException cause) {
+        AgentException unavailable = AgentException.unavailable(message);
+        unavailable.initCause(cause);
+        return unavailable;
+    }
+
     private static AgentException notFound() {
         return new AgentException(AgentException.Reason.NOT_FOUND, "resource not found");
     }
@@ -1226,6 +1383,7 @@ public final class AgentService implements AutoCloseable {
         private LoopCheckpoint checkpoint;
         private boolean safeToResume;
         private boolean resultInFlight;
+        private boolean environmentBusy;
         private final Map<String, ToolResult> toolResults = new HashMap<>();
         private final List<String> steering = new ArrayList<>();
         private final List<SteeringClaim> claimedSteering = new ArrayList<>();

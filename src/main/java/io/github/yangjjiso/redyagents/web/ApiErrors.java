@@ -17,6 +17,7 @@ public class ApiErrors {
             case INVALID -> response(HttpStatus.BAD_REQUEST, "invalid_request", error.getMessage());
             case NOT_FOUND -> response(HttpStatus.NOT_FOUND, "not_found", error.getMessage());
             case CONFLICT -> response(HttpStatus.CONFLICT, "conflict", error.getMessage());
+            case UNAVAILABLE -> response(HttpStatus.SERVICE_UNAVAILABLE, "unavailable", error.getMessage());
         };
     }
 

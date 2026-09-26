@@ -29,6 +29,8 @@ paths:
                   type: string
                   minLength: 1
                   description: Optional initial user message. This implementation supports the string shorthand only.
+                environment:
+                  $ref: '#/components/schemas/EnvironmentRequest'
       responses:
         '201':
           description: Session created
@@ -40,6 +42,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/agents/sessions/{sessionID}:
     parameters:
       - $ref: '#/components/parameters/sessionID'
@@ -54,6 +58,63 @@ paths:
                 $ref: '#/components/schemas/Session'
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/agents/sessions/{sessionID}/environment/pause:
+    parameters:
+      - $ref: '#/components/parameters/sessionID'
+    post:
+      operationId: pauseSessionEnvironment
+      description: Pause an idle session's active CubeSandbox environment.
+      responses:
+        '200':
+          description: Session with paused environment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/agents/sessions/{sessionID}/environment/resume:
+    parameters:
+      - $ref: '#/components/parameters/sessionID'
+    post:
+      operationId: resumeSessionEnvironment
+      description: Resume an idle session's paused CubeSandbox environment.
+      responses:
+        '200':
+          description: Session with active environment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/agents/sessions/{sessionID}/environment/kill:
+    parameters:
+      - $ref: '#/components/parameters/sessionID'
+    post:
+      operationId: killSessionEnvironment
+      description: Permanently stop an idle session's active or paused CubeSandbox environment. The session history remains readable.
+      responses:
+        '200':
+          description: Session with killed environment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/agents/sessions/{sessionID}/turns:
     parameters:
       - $ref: '#/components/parameters/sessionID'
@@ -248,6 +309,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: CubeSandbox provider is unavailable; a lifecycle action may be retried after checking the session environment state.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
   schemas:
     AgentConfig:
       type: object
@@ -273,7 +340,7 @@ components:
           description: Output allocation reserved before fitting the prompt. The bundled demo model does not enforce a generation limit.
     Session:
       type: object
-      required: [id, agent, status, created_at, updated_at]
+      required: [id, agent, status, created_at, updated_at, environment]
       properties:
         id:
           type: string
@@ -288,12 +355,42 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RequiredAction'
+        environment:
+          $ref: '#/components/schemas/SessionEnvironment'
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    EnvironmentRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [none, cube]
+          description: cube is this service's self-hosted CubeSandbox extension.
+        template_id:
+          type: string
+          description: CubeSandbox template ID, if a non-default template is needed.
+      additionalProperties: false
+    SessionEnvironment:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [none, cube]
+        sandbox_id:
+          type: string
+          description: Provider sandbox ID, assigned when a cube session is created.
+        template_id:
+          type: string
+        status:
+          type: string
+          enum: [active, pausing, paused, resuming, killing, killed]
+          description: Present for cube environments. Transition states are durable and block new turns until the same lifecycle action is retried; killed cannot run another turn.
     Turn:
       type: object
       required: [id, session_id, input, status, created_at]

@@ -1,7 +1,7 @@
 package io.github.yangjjiso.redyagents.core;
 
 public final class AgentException extends RuntimeException {
-    public enum Reason { INVALID, NOT_FOUND, CONFLICT }
+    public enum Reason { INVALID, NOT_FOUND, CONFLICT, UNAVAILABLE }
 
     private final Reason reason;
 
@@ -24,5 +24,9 @@ public final class AgentException extends RuntimeException {
 
     public static AgentException conflict() {
         return new AgentException(Reason.CONFLICT, "session already has an active turn");
+    }
+
+    public static AgentException unavailable(String message) {
+        return new AgentException(Reason.UNAVAILABLE, message);
     }
 }

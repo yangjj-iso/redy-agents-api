@@ -24,7 +24,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"server.address=127.0.0.1", "redy.sse.heartbeat-seconds=1"})
+        properties = {"server.address=127.0.0.1", "redy.sse.heartbeat-seconds=1",
+                "redy.cube.enabled=false"})
 class AgentsHttpIntegrationTest {
     @TempDir
     static Path dataDir;
@@ -39,6 +40,23 @@ class AgentsHttpIntegrationTest {
 
     @LocalServerPort
     private int port;
+
+    @Test
+    @Timeout(10)
+    void cubeRequestRequiresConfiguredProviderAndRejectsClientSandboxId() throws Exception {
+        HttpResponse<String> unavailable = post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"example\",\"model\":\"demo\"},"
+                        + "\"environment\":{\"type\":\"cube\",\"template_id\":\"template_1\"}}",
+                "application/json");
+        assertEquals(503, unavailable.statusCode(), unavailable.body());
+        assertEquals("unavailable", json.readTree(unavailable.body()).path("error").path("code").asText());
+
+        HttpResponse<String> invalid = post("/v1/agents/sessions",
+                "{\"agent\":{\"name\":\"example\",\"model\":\"demo\"},"
+                        + "\"environment\":{\"type\":\"cube\",\"sandbox_id\":\"other\"}}",
+                "application/json");
+        assertEquals(400, invalid.statusCode(), invalid.body());
+    }
 
     @Test
     @Timeout(10)

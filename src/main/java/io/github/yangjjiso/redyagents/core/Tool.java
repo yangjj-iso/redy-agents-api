@@ -4,6 +4,12 @@ package io.github.yangjjiso.redyagents.core;
 public interface Tool {
     String execute(CancellationToken cancellation, byte[] arguments) throws Exception;
 
+    /** Context-aware execution for tools backed by a session environment. */
+    default String execute(CancellationToken cancellation, ToolExecutionContext context,
+                           byte[] arguments) throws Exception {
+        return execute(cancellation, arguments);
+    }
+
     default void validateArguments(byte[] arguments) throws ToolFailure {
     }
 
