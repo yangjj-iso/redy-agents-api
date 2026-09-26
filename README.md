@@ -39,6 +39,38 @@ Creating a session with `input` starts its first turn. `POST /events` accepts `a
 
 The event stream exposes the [Agents API session, turn, item, and output-text event names](https://developers.openai.com/api/docs/guides/agents-api/sessions/events) for the supported text and function subset. For example, `agent.session.turn.output_text.delta` has `item_id`, `output_index`, `content_index`, and `delta`; the matching `.done` has the complete `text`. Every event has a stable `event_id`. `agent.session.turn.completed`, `.failed`, and `.cancelled` include the terminal `turn`; `agent.session.requires_action` and `agent.session.idle` include a `session` snapshot. The demo model returns text in one chunk, so its delta is emitted after the model returns. Existing `turn.*`, `message.delta`, `tool.call.*`, and `context.compacted` events and the nested `data` field remain available for older clients. The replay cursor and extra envelope fields are local extensions; OpenAI's live stream does not replay missed events.
 
+## MCP tools
+
+Configure `redy.mcp.servers` to add tools from trusted MCP servers to the default `LoopRunner`. Both local stdio processes and remote Streamable HTTP endpoints use the [official MCP Java SDK](https://java.sdk.modelcontextprotocol.io/latest/client/). For example, add these settings to a deployment's Spring `application.yaml`:
+
+```yaml
+redy:
+  mcp:
+    servers:
+      - name: localfiles
+        transport: stdio
+        command: /absolute/path/to/trusted-mcp-server
+        args: ["--read-only"]
+        env:
+          MCP_WORKSPACE: /srv/agent-readonly
+        request-timeout: 30s
+      - name: search
+        transport: http
+        url: https://mcp.example.com
+        endpoint: /mcp
+        headers:
+          Authorization: "Bearer ${MCP_SEARCH_TOKEN}"
+        request-timeout: 30s
+```
+
+Set `MCP_SEARCH_TOKEN` in the service environment; keep credentials out of committed configuration. Each server needs a unique `name` (1–16 characters, beginning with a letter; then letters, digits, `_`, or `-`). `transport` is `stdio` or `http`. A stdio server needs `command` and can receive `args` and explicitly supplied `env`; an HTTP server needs a base `url` and can receive `endpoint` (default `/mcp`) and `headers`. The default request timeout is 20 seconds. The application makes no MCP connection when the server list is empty.
+
+At startup, the registry connects to every configured server, discovers its tools, and registers each as `mcp__<server>__<tool>`. Tool names outside the supported name alphabet or too long for the agent interface are escaped with a stable hash. If a configured server cannot initialize or list tools, startup fails and already opened connections close. The discovered tool list is a startup snapshot; restart the application after changing a server's tools. A custom Spring `Runner` can inject `McpToolRegistry` and choose how to expose them; the default runner merges MCP and CubeSandbox tools and rejects duplicate names.
+
+Tool execution returns a single MCP text block as text, and encodes multiple blocks or `structuredContent` as JSON for the model. Large multi-block or structured results become a valid JSON object with `truncated: true` and a `preview`; large single text blocks get a truncated text preview. Binary image, audio, and resource data are omitted; their MIME type and other metadata remain visible. An MCP `isError: true` result becomes recoverable tool feedback so the model can correct the next call. A request timeout ends the local wait; the [Java SDK does not yet send MCP cancellation notifications](https://java.sdk.modelcontextprotocol.io/latest/client/#request-timeouts-and-cancellation), so the remote operation may continue. Only tool discovery and calls are exposed through this integration; MCP resources, prompts, sampling, elicitation, and a hosted MCP endpoint are outside its current scope.
+
+The bundled `demo` model never calls tools, so use a model adapter that emits tool calls to exercise them during a turn. Stdio servers execute on the Java service host, with its process permissions, outside CubeSandbox. Their child process environment is cleared before launch; they receive only explicitly configured `env` values plus the SDK's default set such as `PATH` and `HOME`. Configure only servers you trust and grant each the minimum host access and credentials it needs. Use HTTPS for remote servers outside a trusted local network.
+
 ## CubeSandbox environment
 
 An optional CubeSandbox backend gives each `environment.type: "cube"` session its own remote microVM. A [CubeSandbox cluster](https://docs.cubesandbox.com/guide/quickstart) must run on a Linux KVM host; this Java service can connect to it from macOS or another machine. The chosen template must include envd for command and file operations. Configure the CubeAPI URL and either a CubeProxy address for [path routing](https://docs.cubesandbox.com/guide/https-and-domain#path-based-quick-access-no-dns--cert), or CubeSandbox's virtual-host DNS:
@@ -109,6 +141,7 @@ The full HTTP contract is in [`api/openapi.yaml`](api/openapi.yaml). The [archit
 | `src/main/java/io/github/yangjjiso/redyagents/config` | Spring configuration and deployment settings |
 | `src/main/java/io/github/yangjjiso/redyagents/core` | Session/turn state, snapshot store, model and tool interfaces, and harness loop |
 | `src/main/java/io/github/yangjjiso/redyagents/cube` | CubeSandbox adapter, tools, CubeAPI, CubeProxy, and envd Connect protocol |
+| `src/main/java/io/github/yangjjiso/redyagents/mcp` | MCP client lifecycle, discovery, tool naming, and call adaptation |
 | `src/main/java/io/github/yangjjiso/redyagents/web` | HTTP endpoints, JSON errors, SSE |
 | `src/test/java` | API and lifecycle tests |
 | `api/openapi.yaml` | API contract |
@@ -117,4 +150,4 @@ The core's `Model` and `Tool` interfaces are the extension points for providers 
 
 ## Scope
 
-This is a demo-model starter and an Agents API-style subset, not a complete Codex harness or a production deployment. It has no authentication, tenant isolation, model provider integration, MCP, subagents, programmatic JavaScript tool calling, exact tokenizer, or model-based context compressor. The CubeSandbox integration has protocol-level mock tests but has not been verified against a live cluster in this environment. Creating a sandbox and saving its first session snapshot are separate operations; a process crash between them can leave an orphan sandbox. The local file store provides restart recovery but is not a distributed job queue. The default bind address is loopback; add the missing controls before exposing the server to other machines.
+This is a demo-model starter and an Agents API-style subset, not a complete Codex harness or a production deployment. It has no authentication, tenant isolation, model provider integration, subagents, programmatic JavaScript tool calling, exact tokenizer, or model-based context compressor. The MCP integration currently covers client-side tools only. The CubeSandbox integration has protocol-level mock tests but has not been verified against a live cluster in this environment. Creating a sandbox and saving its first session snapshot are separate operations; a process crash between them can leave an orphan sandbox. The local file store provides restart recovery but is not a distributed job queue. The default bind address is loopback; add the missing controls before exposing the server to other machines.

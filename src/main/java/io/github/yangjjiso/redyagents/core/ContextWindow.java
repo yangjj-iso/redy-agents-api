@@ -3,7 +3,10 @@ package io.github.yangjjiso.redyagents.core;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Fits a model prompt into an approximate budget. The default estimator counts UTF-8 bytes
@@ -13,6 +16,7 @@ import java.util.Objects;
  */
 public final class ContextWindow {
     private static final int MESSAGE_OVERHEAD = 8;
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final TokenEstimator estimator;
     private final ContextCompressor compressor;
 
@@ -36,7 +40,14 @@ public final class ContextWindow {
     }
 
     public Result fit(List<Message> messages, String instructions, int promptBudgetTokens) {
+        return fit(messages, instructions, List.of(), promptBudgetTokens);
+    }
+
+    /** Includes the tool catalog supplied to the model in the prompt budget. */
+    public Result fit(List<Message> messages, String instructions,
+                      List<ToolDefinition> tools, int promptBudgetTokens) {
         Objects.requireNonNull(messages, "messages");
+        Objects.requireNonNull(tools, "tools");
         if (promptBudgetTokens <= 0) {
             throw new IllegalArgumentException("prompt budget must be positive");
         }
@@ -51,21 +62,21 @@ public final class ContextWindow {
             throw new IllegalArgumentException("messages must contain the latest user input");
         }
 
-        long instructionCost = textCost(instructions);
-        long originalCost = instructionCost + messagesCost(messages);
+        long fixedCost = textCost(instructions) + toolsCost(tools);
+        long originalCost = fixedCost + messagesCost(messages);
         if (originalCost <= promptBudgetTokens) {
             return new Result(messages, false, (int) originalCost, 0);
         }
 
         Message latestInput = messages.get(latestUser);
-        if (instructionCost + messageCost(latestInput) > promptBudgetTokens) {
-            throw new IllegalArgumentException("latest user input exceeds prompt budget");
+        if (fixedCost + messageCost(latestInput) > promptBudgetTokens) {
+            throw new IllegalArgumentException("instructions, tools, and latest user input exceed prompt budget");
         }
 
         List<Message> currentTurn = new ArrayList<>(messages.subList(latestUser, messages.size()));
-        long currentCost = instructionCost + messagesCost(currentTurn);
+        long currentCost = fixedCost + messagesCost(currentTurn);
         if (currentCost > promptBudgetTokens) {
-            currentCost = trimCurrentTurn(currentTurn, instructionCost, promptBudgetTokens);
+            currentCost = trimCurrentTurn(currentTurn, fixedCost, promptBudgetTokens);
             if (currentCost > promptBudgetTokens) {
                 throw new IllegalArgumentException("prompt budget too small to preserve the current turn");
             }
@@ -116,15 +127,15 @@ public final class ContextWindow {
         }
         fitted.addAll(currentTurn);
 
-        long estimated = instructionCost + messagesCost(fitted);
+        long estimated = fixedCost + messagesCost(fitted);
         if (estimated > promptBudgetTokens) {
             throw new IllegalStateException("context compressor exceeded prompt budget");
         }
         return new Result(fitted, true, (int) estimated, omittedMessages);
     }
 
-    private long trimCurrentTurn(List<Message> currentTurn, long instructionCost, int budget) {
-        long cost = instructionCost + messagesCost(currentTurn);
+    private long trimCurrentTurn(List<Message> currentTurn, long fixedCost, int budget) {
+        long cost = fixedCost + messagesCost(currentTurn);
         for (String role : List.of("tool", "assistant")) {
             for (int i = 1; i < currentTurn.size() && cost > budget; i++) {
                 Message message = currentTurn.get(i);
@@ -134,7 +145,7 @@ public final class ContextWindow {
                 long allowance = Math.max(0, textCost(message.content()) - (cost - budget));
                 String shortened = fitText(message.content(), allowance);
                 currentTurn.set(i, message.withContent(shortened));
-                cost = instructionCost + messagesCost(currentTurn);
+                cost = fixedCost + messagesCost(currentTurn);
             }
         }
         return cost;
@@ -179,6 +190,21 @@ public final class ContextWindow {
             total += messageCost(message);
         }
         return total;
+    }
+
+    private long toolsCost(List<ToolDefinition> tools) {
+        if (tools.isEmpty()) {
+            return 0;
+        }
+        try {
+            List<Map<String, Object>> payload = tools.stream().map(tool -> Map.<String, Object>of(
+                    "type", "function",
+                    "function", Map.of("name", tool.name(), "description", tool.description(),
+                            "parameters", tool.inputSchema()))).toList();
+            return textCost(JSON.writeValueAsString(payload)) + (long) MESSAGE_OVERHEAD * tools.size();
+        } catch (JacksonException error) {
+            throw new IllegalArgumentException("cannot estimate tool definitions", error);
+        }
     }
 
     private long messageCost(Message message) {

@@ -1,8 +1,16 @@
 package io.github.yangjjiso.redyagents.core;
 
+import java.util.Map;
+
 @FunctionalInterface
 public interface Tool {
     String execute(CancellationToken cancellation, byte[] arguments) throws Exception;
+
+    /** Metadata supplied to the model for this tool's registered name. */
+    default ToolDefinition definition(String registeredName) {
+        return new ToolDefinition(registeredName, "",
+                Map.of("type", "object", "additionalProperties", true));
+    }
 
     /** Context-aware execution for tools backed by a session environment. */
     default String execute(CancellationToken cancellation, ToolExecutionContext context,

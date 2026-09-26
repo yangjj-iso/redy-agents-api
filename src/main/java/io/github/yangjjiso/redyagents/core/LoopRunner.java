@@ -13,6 +13,7 @@ import java.util.concurrent.CancellationException;
 public final class LoopRunner implements ResumableRunner {
     private final Model model;
     private final Map<String, Tool> tools;
+    private final List<ToolDefinition> toolDefinitions;
     private final int maxSteps;
     private final ContextWindow contextWindow;
 
@@ -27,6 +28,17 @@ public final class LoopRunner implements ResumableRunner {
     public LoopRunner(Model model, Map<String, Tool> tools, int maxSteps, ContextWindow contextWindow) {
         this.model = model;
         this.tools = tools == null ? Map.of() : Map.copyOf(tools);
+        this.toolDefinitions = this.tools.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> {
+                    ToolDefinition definition = Objects.requireNonNull(
+                            entry.getValue().definition(entry.getKey()), "tool definition");
+                    if (!entry.getKey().equals(definition.name())) {
+                        throw new IllegalArgumentException("tool definition name does not match registered name");
+                    }
+                    return definition;
+                })
+                .toList();
         this.maxSteps = maxSteps > 0 ? maxSteps : 8;
         this.contextWindow = contextWindow == null ? new ContextWindow() : contextWindow;
     }
@@ -133,7 +145,7 @@ public final class LoopRunner implements ResumableRunner {
             appendSteering(messages, emit);
             AgentConfig agent = session.agent();
             ContextWindow.Result context = contextWindow.fit(
-                    List.copyOf(messages), agent.instructions(), agent.promptBudgetTokens());
+                    List.copyOf(messages), agent.instructions(), toolDefinitions, agent.promptBudgetTokens());
             if (context.compacted()) {
                 emit.emit("context.compacted", Map.of(
                         "step", step + 1,
@@ -145,7 +157,7 @@ public final class LoopRunner implements ResumableRunner {
             step++;
             emit.markSteeringConsumed();
             cancellation.throwIfCancelled();
-            Decision decision = model.next(cancellation, agent, List.copyOf(messages));
+            Decision decision = model.next(cancellation, agent, List.copyOf(messages), toolDefinitions);
             cancellation.throwIfCancelled();
             if (decision == null) {
                 throw new IllegalStateException("model returned no decision");

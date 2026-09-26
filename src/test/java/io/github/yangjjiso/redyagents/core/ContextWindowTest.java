@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
@@ -128,6 +129,38 @@ class ContextWindowTest {
         assertTrue(sawPriorSummary.get());
         assertEquals("[summary] retained", result.messages().get(0).content());
         assertTrue(result.estimatedTokens() <= 80);
+    }
+
+    @Test
+    void reservesToolDefinitionBytesBeforeKeepingConversationHistory() {
+        List<Message> original = List.of(
+                new Message("user", "A".repeat(180)), new Message("assistant", "B".repeat(180)),
+                new Message("user", "now"));
+        ToolDefinition search = new ToolDefinition("search", "Search an index of documents",
+                Map.of("type", "object", "properties", Map.of("query", Map.of(
+                        "type", "string", "description", "A phrase to search for"))));
+        int budget = window.fit(original, "", 1000).estimatedTokens();
+
+        ContextWindow.Result result = window.fit(original, "", List.of(search), budget);
+
+        assertTrue(result.compacted());
+        assertEquals(2, result.omittedMessages());
+        assertEquals(new Message("user", "now"), result.messages().get(result.messages().size() - 1));
+        assertTrue(result.estimatedTokens() <= budget);
+        assertTrue(result.estimatedTokens()
+                > window.fit(result.messages(), "", 1000).estimatedTokens(),
+                "reported estimate must include tool schema and description");
+    }
+
+    @Test
+    void rejectsToolCatalogThatLeavesNoRoomForLatestUserInput() {
+        ToolDefinition large = new ToolDefinition("search", "x".repeat(200),
+                Map.of("type", "object"));
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> window.fit(List.of(new Message("user", "now")), "", List.of(large), 100));
+
+        assertTrue(error.getMessage().contains("prompt budget"));
     }
 
     @Test
