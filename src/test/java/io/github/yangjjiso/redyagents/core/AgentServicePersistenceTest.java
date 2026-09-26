@@ -236,8 +236,8 @@ class AgentServicePersistenceTest {
             awaitSessionStatus(original, sessionId, "requires_action");
         }
 
-        AgentService.Snapshot waiting = json.readValue(store.loadAll().get(sessionId),
-                AgentService.Snapshot.class);
+        SessionSnapshot waiting = json.readValue(store.loadAll().get(sessionId),
+                SessionSnapshot.class);
         assertNotNull(waiting.checkpoint().pendingExternal());
         ToolResult supplied = new ToolResult("call_safe", true, "found", null);
         LoopCheckpoint resumed = runner.resumeExternal(waiting.checkpoint(), supplied,
@@ -253,7 +253,7 @@ class AgentServicePersistenceTest {
         items.add(new SessionItem("item_safe_result", turnId, "function_call_output",
                 output.role(), output.content(), output.tool(), output.callId(),
                 output.argumentsBase64(), output.success(), Instant.now()));
-        AgentService.Snapshot safe = new AgentService.Snapshot(active, List.of(executing),
+        SessionSnapshot safe = new SessionSnapshot(active, List.of(executing),
                 waiting.context(), resumed.messages(), waiting.events(), items, resumed,
                 Map.of(turnId + ":call_safe", supplied), waiting.steering(), true);
         store.save(sessionId, json.writeValueAsBytes(safe));
@@ -336,15 +336,15 @@ class AgentServicePersistenceTest {
             secondTurn = service.startTurn(sessionId, "Second").id();
             awaitSessionStatus(service, sessionId, "requires_action");
         }
-        AgentService.Snapshot waiting = json.readValue(store.loadAll().get(sessionId),
-                AgentService.Snapshot.class);
+        SessionSnapshot waiting = json.readValue(store.loadAll().get(sessionId),
+                SessionSnapshot.class);
         List<Turn> turns = new ArrayList<>(waiting.turns());
         Turn pending = turns.get(turns.size() - 1);
         turns.set(turns.size() - 1, new Turn(pending.id(), pending.sessionId(), pending.input(),
                 "in_progress", "", "", pending.createdAt(), null));
         Session active = new Session(waiting.session().id(), waiting.session().agent(),
                 "in_progress", secondTurn, waiting.session().createdAt(), Instant.now());
-        AgentService.Snapshot interrupted = new AgentService.Snapshot(active, turns,
+        SessionSnapshot interrupted = new SessionSnapshot(active, turns,
                 waiting.context(), waiting.executionMessages(), waiting.events(), waiting.items(),
                 waiting.checkpoint(), waiting.toolResults(), waiting.steering(), false);
         store.save(sessionId, json.writeValueAsBytes(interrupted));
@@ -386,8 +386,8 @@ class AgentServicePersistenceTest {
             assertEquals("cancelled", awaitTurnStatus(service, sessionId, turnId, "cancelled").status());
 
             // The worker is interrupted here; a failed file write would leave the prior snapshot.
-            AgentService.Snapshot durable = json.readValue(store.loadAll().get(sessionId),
-                    AgentService.Snapshot.class);
+            SessionSnapshot durable = json.readValue(store.loadAll().get(sessionId),
+                    SessionSnapshot.class);
             assertEquals("cancelled", durable.turns().get(0).status());
             assertEquals("idle", durable.session().status());
             assertTrue(durable.events().stream().anyMatch(event -> "turn.cancelled".equals(event.type())));
@@ -454,8 +454,8 @@ class AgentServicePersistenceTest {
                     .filter(item -> originalTurnId.equals(item.turnId())
                             && "user".equals(item.role()) && "steer one".equals(item.content()))
                     .count(), "the cancelled turn keeps its audit item");
-            AgentService.Snapshot durable = json.readValue(
-                    new FileSessionStore(snapshots).loadAll().get(sessionId), AgentService.Snapshot.class);
+            SessionSnapshot durable = json.readValue(
+                    new FileSessionStore(snapshots).loadAll().get(sessionId), SessionSnapshot.class);
             assertTrue(durable.claimedSteering().isEmpty());
             assertTrue(durable.steering().isEmpty());
         } finally {
@@ -589,8 +589,8 @@ class AgentServicePersistenceTest {
             Files.createDirectories(copied);
             Files.copy(live.resolve(sessionId + ".snapshot"),
                     copied.resolve(sessionId + ".snapshot"));
-            AgentService.Snapshot crashed = json.readValue(
-                    new FileSessionStore(copied).loadAll().get(sessionId), AgentService.Snapshot.class);
+            SessionSnapshot crashed = json.readValue(
+                    new FileSessionStore(copied).loadAll().get(sessionId), SessionSnapshot.class);
             assertEquals(false, crashed.safeToResume());
             assertEquals(1, crashed.claimedSteering().size());
             assertEquals("steer after crash", crashed.claimedSteering().get(0).input());
@@ -668,8 +668,8 @@ class AgentServicePersistenceTest {
             Files.createDirectories(copied);
             Files.copy(live.resolve(sessionId + ".snapshot"),
                     copied.resolve(sessionId + ".snapshot"));
-            AgentService.Snapshot crashed = json.readValue(
-                    new FileSessionStore(copied).loadAll().get(sessionId), AgentService.Snapshot.class);
+            SessionSnapshot crashed = json.readValue(
+                    new FileSessionStore(copied).loadAll().get(sessionId), SessionSnapshot.class);
             assertEquals(1, crashed.claimedSteering().size());
             assertEquals(false, crashed.claimedSteering().get(0).consumed());
 

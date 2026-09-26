@@ -5,6 +5,9 @@ import io.github.yangjjiso.redyagents.core.DemoModel;
 import io.github.yangjjiso.redyagents.core.FileSessionStore;
 import io.github.yangjjiso.redyagents.core.LoopRunner;
 import io.github.yangjjiso.redyagents.core.Model;
+import io.github.yangjjiso.redyagents.core.Runner;
+import io.github.yangjjiso.redyagents.core.SandboxProvisioner;
+import io.github.yangjjiso.redyagents.core.SessionStore;
 import io.github.yangjjiso.redyagents.cube.CubeSandboxBackend;
 import io.github.yangjjiso.redyagents.cube.CubeSandboxClient;
 import io.github.yangjjiso.redyagents.cube.SandboxTools;
@@ -31,11 +34,21 @@ public class RedyAgentsConfiguration {
     @Bean
     AgentService agentService(@Value("${redy.data-dir:.redy-data}") String dataDir,
                               ObjectProvider<Model> models,
+                              ObjectProvider<Runner> runners,
+                              ObjectProvider<SessionStore> stores,
+                              ObjectProvider<SandboxProvisioner> provisioners,
                               ObjectProvider<CubeSandboxBackend> cubeBackend) throws IOException {
         CubeSandboxBackend cube = cubeBackend.getIfAvailable();
-        Model model = models.getIfAvailable();
-        return new AgentService(new LoopRunner(model == null ? new DemoModel() : model,
-                cube == null ? Map.of() : SandboxTools.create(cube), 8),
-                new FileSessionStore(Path.of(dataDir)), cube);
+        Runner runner = runners.getIfAvailable();
+        if (runner == null) {
+            Model model = models.getIfAvailable();
+            runner = new LoopRunner(model == null ? new DemoModel() : model,
+                    cube == null ? Map.of() : SandboxTools.create(cube), 8);
+        }
+        SessionStore store = stores.getIfAvailable();
+        if (store == null) {
+            store = new FileSessionStore(Path.of(dataDir));
+        }
+        return new AgentService(runner, store, provisioners.getIfAvailable());
     }
 }

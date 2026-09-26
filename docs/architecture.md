@@ -5,8 +5,10 @@ Redy Agents API is a Java 17 Agents API subset. The default `demo` model returns
 ```mermaid
 flowchart LR
     HTTP[HTTP / SSE] --> Service[AgentService]
-    Service --> Runner[Runner / ResumableRunner]
+    Service --> Worker[TurnExecution]
+    Worker --> Runner[Runner / ResumableRunner]
     Service --> Snapshots[SessionSnapshotRepository]
+    Snapshots --> Snapshot[SessionSnapshot]
     Service --> Provisioner[SandboxProvisioner]
     Runner --> Model[Model]
     Runner --> Tools[Tool registry]
@@ -23,13 +25,13 @@ flowchart LR
 | Boundary | Owner | Responsibility |
 | --- | --- | --- |
 | HTTP | `web` | Request validation, response mapping, event stream transport |
-| Session orchestration | `core.AgentService` | Session and turn transitions, worker scheduling, event ordering, recovery decisions |
+| Session orchestration | `core.AgentService`, `core.TurnExecution` | Session and turn transitions, worker scheduling, worker execution, event ordering, recovery decisions |
 | Harness | `core.Runner`, `core.ResumableRunner`, `core.LoopRunner` | Model/tool loop, checkpoints, context budget, duplicate-call handling |
-| Persistence | `core.SessionSnapshotRepository`, `core.SessionStore` | Snapshot encoding and durable storage; the file implementation writes one snapshot per session |
+| Persistence | `core.SessionSnapshot`, `core.SessionSnapshotRepository`, `core.SessionStore` | Snapshot schema, encoding, and durable storage; the file implementation writes one snapshot per session |
 | Sandbox port | `core.SandboxProvisioner`, `core.SandboxToolBackend` | Provider-independent lifecycle and tool operations |
 | Cube adapter | `cube.CubeSandboxBackend`, `cube.SandboxTools` | Bind a session's sandbox ID to the ports and the shell/file tools |
 | Cube protocol | `cube.CubeSandboxClient` and package-private collaborators | CubeAPI control requests, CubeProxy/envd requests, Connect stream frames |
-| Composition | `config` | Bind deployment settings and assemble the default model, harness, store, and optional Cube backend |
+| Composition | `config` | Bind deployment settings; use registered `Runner`, `SessionStore`, and `SandboxProvisioner` beans when provided, or assemble defaults |
 
 ## Session and turn flow
 
@@ -44,12 +46,14 @@ The [OpenAPI contract](../api/openapi.yaml) describes the HTTP surface. `environ
 ## Extension points
 
 - Provide one Spring `Model` bean to replace `DemoModel`; when none is registered, composition uses the demo implementation.
-- Implement `Runner` for a simple one-shot turn or `ResumableRunner` for checkpointed function handoff and restart recovery.
+- Register a Spring `Runner` bean for a simple one-shot turn or `ResumableRunner` for checkpointed function handoff and restart recovery. The default runner is `LoopRunner`.
 - Register tools in the `LoopRunner` tool map. A tool may validate arguments and results; `ToolFailure` is returned to the model as feedback. Shell exit codes are command results, including nonzero codes.
-- Implement `SessionStore` to replace the local file store, and `SandboxProvisioner` plus `SandboxToolBackend` to replace CubeSandbox.
+- Register a Spring `SessionStore` bean to replace the local file store. Register `SandboxProvisioner` and a suitable runner/tool backend to replace CubeSandbox.
 
 ## Current scaling limits
 
 `AgentService` still uses one lock for all sessions. It serializes and writes a complete session snapshot while holding that lock, so a slow disk or a long history can delay unrelated sessions. Context, execution messages, and checkpoint messages also hold overlapping conversation state. Moving to per-session synchronization and an append-only event store is the next architectural step; it requires a storage migration and concurrency tests. The current file store is intended for a single service process.
+
+`ResumableRunner` still exposes `LoopCheckpoint`, so alternate checkpoint formats need a contract change. `ContextWindow` treats the latest user message as the start of the protected current turn; steering submitted during a tool exchange can cause earlier messages in that exchange to be compacted. Each SSE subscription currently uses a writer thread and an event-dispatch thread.
 
 Creating a Cube sandbox and writing the first session snapshot are separate operations. A process crash in that interval can leave an orphan sandbox. The Cube protocol has mock tests, but a live cluster has not been available for end-to-end verification.

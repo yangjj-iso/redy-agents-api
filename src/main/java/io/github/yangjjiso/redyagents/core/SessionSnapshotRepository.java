@@ -16,12 +16,12 @@ final class SessionSnapshotRepository {
         this.store = Objects.requireNonNull(store, "store");
     }
 
-    Map<String, AgentService.Snapshot> loadAll() throws IOException {
-        Map<String, AgentService.Snapshot> snapshots = new LinkedHashMap<>();
+    Map<String, SessionSnapshot> loadAll() throws IOException {
+        Map<String, SessionSnapshot> snapshots = new LinkedHashMap<>();
         for (Map.Entry<String, byte[]> entry : store.loadAll().entrySet()) {
-            AgentService.Snapshot snapshot;
+            SessionSnapshot snapshot;
             try {
-                snapshot = json.readValue(entry.getValue(), AgentService.Snapshot.class);
+                snapshot = json.readValue(entry.getValue(), SessionSnapshot.class);
             } catch (Exception failure) {
                 throw new IOException("invalid session snapshot: " + entry.getKey(), failure);
             }
@@ -34,7 +34,7 @@ final class SessionSnapshotRepository {
         return snapshots;
     }
 
-    void save(AgentService.Snapshot snapshot) {
+    void save(SessionSnapshot snapshot) {
         Objects.requireNonNull(snapshot, "snapshot");
         boolean restoreInterrupt = Thread.interrupted();
         try {

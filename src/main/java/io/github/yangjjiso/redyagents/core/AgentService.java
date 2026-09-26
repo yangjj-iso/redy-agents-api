@@ -1,5 +1,6 @@
 package io.github.yangjjiso.redyagents.core;
 
+import io.github.yangjjiso.redyagents.core.SessionSnapshot.SteeringClaim;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -10,7 +11,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -23,8 +23,8 @@ public final class AgentService implements AutoCloseable {
     private final Object lock = new Object();
     private final Map<String, SessionState> sessions = new HashMap<>();
     private final SecureRandom random = new SecureRandom();
-    private final Runner runner;
     private final ResumableRunner resumableRunner;
+    private final TurnExecution turnExecution;
     private final SessionSnapshotRepository snapshots;
     private final SandboxProvisioner sandboxProvisioner;
     private final ObjectMapper json = new ObjectMapper();
@@ -48,8 +48,30 @@ public final class AgentService implements AutoCloseable {
         if (runner == null) {
             throw new IllegalArgumentException("runner is required");
         }
-        this.runner = runner;
         this.resumableRunner = runner instanceof ResumableRunner resumable ? resumable : null;
+        this.turnExecution = new TurnExecution(runner, resumableRunner, new TurnExecution.State() {
+            @Override
+            public EventEmitter emitter(Turn turn) {
+                return AgentService.this.emitter(turn);
+            }
+
+            @Override
+            public void beforeAdvance(Turn turn) {
+                markCheckpointRunning(turn);
+            }
+
+            @Override
+            public void pauseForFunction(Turn turn, CancellationToken cancellation,
+                                         LoopProgress progress) {
+                AgentService.this.pauseForFunction(turn, cancellation, progress);
+            }
+
+            @Override
+            public void finishTurn(Turn turn, CancellationToken cancellation, String status,
+                                   String output, String error, List<Message> context) {
+                AgentService.this.finishTurn(turn, cancellation, status, output, error, context);
+            }
+        });
         this.snapshots = store == null ? null : new SessionSnapshotRepository(store);
         this.sandboxProvisioner = sandboxProvisioner;
         restore();
@@ -306,9 +328,11 @@ public final class AgentService implements AutoCloseable {
         List<Message> completedHistory = List.copyOf(history);
         try {
             if (resumableRunner != null) {
-                turnExecutor.execute(() -> runLoop(cancellation, runnerSession, checkpoint, turn));
+                turnExecutor.execute(() -> turnExecution.runResumable(
+                        cancellation, runnerSession, checkpoint, turn));
             } else {
-                turnExecutor.execute(() -> runTurn(cancellation, runnerSession, completedHistory, turn));
+                turnExecutor.execute(() -> turnExecution.runPlain(
+                        cancellation, runnerSession, completedHistory, turn));
             }
         } catch (RuntimeException rejected) {
             finishTurn(turn, cancellation, "failed", "", "worker unavailable", null);
@@ -491,7 +515,8 @@ public final class AgentService implements AutoCloseable {
         }
         LoopCheckpoint resumeFrom = checkpoint;
         try {
-            turnExecutor.execute(() -> runLoop(cancellation, runnerSession, resumeFrom, turn));
+            turnExecutor.execute(() -> turnExecution.runResumable(
+                    cancellation, runnerSession, resumeFrom, turn));
         } catch (RuntimeException rejected) {
             finishTurn(turn, cancellation, "failed", "", "worker unavailable", null);
             throw rejected;
@@ -613,59 +638,14 @@ public final class AgentService implements AutoCloseable {
         return subscription;
     }
 
-    private void runTurn(CancellationToken cancellation, Session session, List<Message> history, Turn turn) {
-        cancellation.attachWorker();
-        try {
-            cancellation.throwIfCancelled();
-            RunResult result = runner.runWithContext(cancellation, session, history, turn.input(), emitter(turn));
-            finishTurn(turn, cancellation, "completed", result.output(), "", result.context());
-        } catch (Throwable failure) {
-            if (cancellation.isCancelled() || failure instanceof CancellationException) {
-                finishTurn(turn, cancellation, "cancelled", "", "", null);
-            } else {
-                String message = failure.getMessage();
-                finishTurn(turn, cancellation, "failed", "",
-                        message == null || message.isEmpty() ? failure.getClass().getSimpleName() : message, null);
+    private void markCheckpointRunning(Turn turn) {
+        synchronized (lock) {
+            SessionState state = sessions.get(turn.sessionId());
+            if (state != null && turn.id().equals(state.session.activeTurnId())
+                    && state.safeToResume) {
+                state.safeToResume = false;
+                persist(state);
             }
-        } finally {
-            cancellation.detachWorker();
-            Thread.interrupted();
-        }
-    }
-
-    private void runLoop(CancellationToken cancellation, Session session,
-                         LoopCheckpoint checkpoint, Turn turn) {
-        cancellation.attachWorker();
-        try {
-            cancellation.throwIfCancelled();
-            synchronized (lock) {
-                SessionState state = sessions.get(turn.sessionId());
-                if (state != null && turn.id().equals(state.session.activeTurnId())
-                        && state.safeToResume) {
-                    state.safeToResume = false;
-                    persist(state);
-                }
-            }
-            LoopProgress progress = resumableRunner.advance(
-                    cancellation, session, checkpoint, emitter(turn));
-            cancellation.throwIfCancelled();
-            if (progress.isCompleted()) {
-                finishTurn(turn, cancellation, "completed", progress.output(), "",
-                        progress.checkpoint().messages());
-            } else {
-                pauseForFunction(turn, cancellation, progress);
-            }
-        } catch (Throwable failure) {
-            if (cancellation.isCancelled() || failure instanceof CancellationException) {
-                finishTurn(turn, cancellation, "cancelled", "", "", null);
-            } else {
-                String message = failure.getMessage();
-                finishTurn(turn, cancellation, "failed", "",
-                        message == null || message.isEmpty() ? failure.getClass().getSimpleName() : message, null);
-            }
-        } finally {
-            cancellation.detachWorker();
-            Thread.interrupted();
         }
     }
 
@@ -1111,7 +1091,7 @@ public final class AgentService implements AutoCloseable {
         }
         synchronized (lock) {
             try {
-                for (Snapshot snapshot : snapshots.loadAll().values()) {
+                for (SessionSnapshot snapshot : snapshots.loadAll().values()) {
                     SessionState state = new SessionState(snapshot.session());
                     for (Turn turn : snapshot.turns()) {
                         state.turns.put(turn.id(), turn);
@@ -1156,7 +1136,8 @@ public final class AgentService implements AutoCloseable {
             state.cancellation = cancellation;
             Session session = state.session;
             LoopCheckpoint checkpoint = state.checkpoint;
-            turnExecutor.execute(() -> runLoop(cancellation, session, checkpoint, turn));
+            turnExecutor.execute(() -> turnExecution.runResumable(
+                    cancellation, session, checkpoint, turn));
             return;
         }
         boolean wasCancelling = "cancelling".equals(turn.status());
@@ -1218,50 +1199,11 @@ public final class AgentService implements AutoCloseable {
         if (snapshots == null) {
             return;
         }
-        Snapshot snapshot = new Snapshot(state.session, List.copyOf(state.turns.values()),
+        SessionSnapshot snapshot = new SessionSnapshot(state.session, List.copyOf(state.turns.values()),
                 state.context, List.copyOf(state.executionMessages), List.copyOf(state.events),
                 List.copyOf(state.items), state.checkpoint, Map.copyOf(state.toolResults),
                 List.copyOf(state.steering), List.copyOf(state.claimedSteering), state.safeToResume);
         snapshots.save(snapshot);
-    }
-
-    public record Snapshot(Session session, List<Turn> turns, List<Message> context,
-                           List<Message> executionMessages, List<Event> events,
-                           List<SessionItem> items, LoopCheckpoint checkpoint,
-                           Map<String, ToolResult> toolResults, List<String> steering,
-                           List<SteeringClaim> claimedSteering, Boolean safeToResume) {
-        public Snapshot(Session session, List<Turn> turns, List<Message> context,
-                        List<Message> executionMessages, List<Event> events,
-                        List<SessionItem> items, LoopCheckpoint checkpoint,
-                        Map<String, ToolResult> toolResults, List<String> steering,
-                        Boolean safeToResume) {
-            this(session, turns, context, executionMessages, events, items, checkpoint,
-                    toolResults, steering, List.of(), safeToResume);
-        }
-
-        public Snapshot {
-            turns = turns == null ? List.of() : List.copyOf(turns);
-            context = context == null ? List.of() : List.copyOf(context);
-            executionMessages = executionMessages == null ? List.of() : List.copyOf(executionMessages);
-            events = events == null ? List.of() : List.copyOf(events);
-            items = items == null ? List.of() : List.copyOf(items);
-            toolResults = toolResults == null ? Map.of() : Map.copyOf(toolResults);
-            steering = steering == null ? List.of() : List.copyOf(steering);
-            claimedSteering = claimedSteering == null ? List.of() : List.copyOf(claimedSteering);
-            safeToResume = safeToResume != null && safeToResume;
-        }
-    }
-
-    public record SteeringClaim(String input, int messageIndex, boolean consumed) {
-        public SteeringClaim(String input, int messageIndex) {
-            this(input, messageIndex, false);
-        }
-
-        public SteeringClaim {
-            if (input == null || input.isBlank() || messageIndex < 0) {
-                throw new IllegalArgumentException("invalid steering claim");
-            }
-        }
     }
 
     private record BufferedEffect(String type, Map<String, Object> data, Message message) {}
